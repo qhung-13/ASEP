@@ -1,0 +1,39 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+dist/
+coverage/
+
+# Java / Spring Boot / Gradle
+target/
+build/
+.gradle/
+*.class
+
+# IDE and editor
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Logs and temporary files
+*.log
+*.tmp
+.cache/
+tmp/
+
+# OS-generated files
+.DS_Store
+Thumbs.db

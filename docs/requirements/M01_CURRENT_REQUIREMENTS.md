@@ -1,9 +1,9 @@
 # ASEP M01 - Current Requirements Consolidation (v0.2 + Amendments)
 
-> **Repository document status: DRAFT - PENDING EXPLICIT OWNER REVIEW.**  
+> **Repository document status: OWNER-ACCEPTED CONSOLIDATION (2026-10-18; M00-04).**
 > **Underlying decision status:** Requirements v0.1 approved 2026-10-15; CR-001 v0.2 and Viewer Global Full Read-Only Amendment approved according to 2026-10-17 conversation/handoff; final architecture reaffirmed them on 2026-10-18.  
 > **Provenance:** Historical v0.1 full texts plus `docs/sources/recovered/01_Requirements_CR001_Viewer_RECOVERED.md` and M00-03 Final Architecture Review. Full original CR-001 Draft 2 and standalone Viewer amendment **not recovered**.  
-> This file consolidates evidenced decisions; it **does not claim to reproduce the missing original** or create a new approval.
+> This file consolidates evidenced decisions and was accepted as a repository document on 2026-10-18; it **does not claim to reproduce the missing original** or introduce new implementation decisions.
 
 ## 1. M01 outcome and boundary
 
@@ -137,11 +137,11 @@ Do **not** execute obsolete v0.1 acceptance criteria as if they remain the effec
 - Full original CR-001 Draft 2 and standalone Viewer Amendment: **SOURCE CONTENT MISSING**. No invented amendment ID.
 - Exact semantics of max three inline findings across multiple publication attempts for the same Review: **NEEDS CLARIFICATION**; CR-001 wording is **per publication**.
 - Numerical quality/activation thresholds, job/schema/identity/runtime mechanisms and actual GitLab API behaviors: **DEFERRED / NOT VERIFIED**.
-- This consolidation is **PENDING OWNER APPROVAL** as a repository artifact; it must not be tagged as the historical signed-off original.
+- This repository consolidation was **OWNER ACCEPTED on 2026-10-18** under the documented source gaps; it must not be tagged as the historical signed-off original.
 
 ## 10. Sources
 
 - [M00-01 M01 MVP Scope v0.1](v0.1/M01_MVP_SCOPE.md) and [Project Vision v0.1](v0.1/PROJECT_VISION.md) - historical approved texts.
 - [M00-04 CR-001/Viewer recovered evidence](../sources/recovered/01_Requirements_CR001_Viewer_RECOVERED.md) - reconstruction, not original CR full text.
 - [M00-03 Architecture recovered notes](../sources/recovered/02_System_Architecture_Detailed_Design_RECOVERED.md).
-- [Architecture document](../architecture/ARCHITECTURE.md) and [Traceability](../verification/TRACEABILITY_AND_RISKS.md) - new consolidation drafts.
+- [Architecture document](../architecture/ARCHITECTURE.md) and [Traceability](../verification/TRACEABILITY_AND_RISKS.md) - Owner-accepted repository consolidations, not original archived records.

@@ -1,6 +1,6 @@
 # ASEP M01 - System Architecture (Consolidated Design v0.1)
 
-> **Repository artifact status: DRAFT - PENDING OWNER REVIEW.**  
+> **Repository artifact status: OWNER-ACCEPTED CONSOLIDATION (2026-10-18; M00-04).**
 > **Architecture decision status:** Final System Architecture Baseline v0.1 explicitly **OWNER APPROVED at design level on 2026-10-18**.  
 > **Provenance:** M00-03 Final Architecture Review, Owner approval message, ADR-001/ADR-002 decision content, recovered MD-01..10 and TSE-01..06C notes. This is a newly prepared repository consolidation, **not the missing original standalone ARCHITECTURE.md**.  
 > **Implementation/runtime:** NOT VERIFIED. V-01..V-14 remain OPEN/NOT VERIFIED.
@@ -205,7 +205,7 @@ Follow [Traceability and Risks](../verification/TRACEABILITY_AND_RISKS.md). Pass
 
 **Final Design Owner sign-off dated 2026-10-18** explicitly approved the Final System Architecture Baseline v0.1 at architectural-design level while retaining ADR-001/002, MD-01..10, TSE-01..06C, Requirements v0.2 + amendments, Testing & Observability and Traceability/Risk Backlog. It explicitly **did not** approve M01 implementation, deployment, Keycloak, GitLab runtime, AI quality, deferred choices, or closure of V-01..V-14.
 
-This repository document is a **newly written consolidation** and remains pending its own Owner approval. Sources:
+This repository document is a **newly written consolidation**, accepted by the Owner as the repository design baseline on 2026-10-18. It is not a verbatim copy of missing originals or runtime approval. Sources:
 
 - [ADR-001](adr/ADR-001.md), [ADR-002](adr/ADR-002.md)
 - [Recovered detailed system design](../sources/recovered/02_System_Architecture_Detailed_Design_RECOVERED.md)

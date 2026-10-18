@@ -1,6 +1,6 @@
 # ASEP M01 - Requirements Traceability and Risk/Verification Backlog
 
-> **Repository-document status: DRAFT - PENDING OWNER REVIEW.**  
+> **Repository-document status: OWNER-ACCEPTED CONSOLIDATION (2026-10-18; M00-04).**
 > **Underlying planning baseline:** Requirements Traceability & Risk/Verification Backlog v0.1 accepted 2026-10-18 for architectural planning.  
 > **Source:** `docs/sources/recovered/06_Traceability_Risk_Verification_v0.1_RECOVERED.md`, historical M01 scope, recovered requirements amendments, ADRs and Testing & Observability notes.  
 > **Runtime/evidence status:** No tests, API calls, model benchmarks or infrastructure validations were performed to create this document. **All V-01..V-14 remain OPEN / NOT VERIFIED.**
@@ -8,7 +8,7 @@
 ## 1. Traceability rules
 
 - The authoritative historical requirements are preserved in `requirements/v0.1/`. CR-001 v0.2 and Viewer Global Full Read-Only replace **only conflicting** v0.1 rules.
-- Module/verification mappings below inherit an approved M00-03 *planning direction*, but this repository text is a new consolidation and does not create a new approval.
+- Module/verification mappings below inherit an approved M00-03 *planning direction*, but this repository text was accepted by the Owner on 2026-10-18 as a documentation baseline and does not approve new technical decisions.
 - An **architecture approval** means an approach was accepted. It does **not** establish an actual implementation, passing tests, runtime permissions or a safe Auto-Publish capability.
 - Verification IDs V-01..V-14 identify open obligations. They are not bug-fix completion claims or code test result IDs.
 - Read `docs/INDEX.md` for precedence, missing originals and supersession caveats.

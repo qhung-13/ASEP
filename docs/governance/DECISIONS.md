@@ -1,6 +1,6 @@
-# ASEP M01 - Architecture Decision Register (Consolidation Draft v0.1)
+# ASEP M01 - Architecture Decision Register (Consolidated v0.1)
 
-> **Repository-document status: DRAFT - PENDING OWNER REVIEW.**  
+> **Repository-document status: OWNER-ACCEPTED REGISTER CONSOLIDATION (2026-10-18; M00-04).**
 > **Approved source decisions:** ADR-001/002; MD-01..10; TSE-01..06C at their *individual* approval scopes, consolidated in M00-03. The register structure was accepted by the Owner on 2026-10-18.  
 > **Provenance:** Recovered register, Module Decisions and TSE notes. Original individual MD/TSE decision transcripts and full comparison tables are not verified as available. This document is **not** verbatim re-export of those sources.
 

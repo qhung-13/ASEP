@@ -1,6 +1,6 @@
 # ASEP - Implementation Roadmap & Project Control Snapshot
 
-> **Repository-document status: DRAFT - PENDING OWNER REVIEW.**  
+> **Repository-document status: OWNER-ACCEPTED HISTORICAL SNAPSHOT (2026-10-18; M00-04), NOT live Project Control status.**
 > **Roadmap source:** Roadmap Baseline v0.1 later reported Owner APPROVED; original 2026-10-14 Project Control document was labeled **PROPOSED** at preparation time.  
 > **Status evidence:** M00-04 handoff reported M00-01/02/03 COMPLETED and M00-04 READY; this is a **historical snapshot**, not a live Project Control update.  
 > **Scope:** Record approved milestone direction and known historical statuses; do not create new tickets/assignments or claim M01 implementation.
@@ -77,7 +77,7 @@ Potential M00-04 exit evidence (documentation planning checklist, **not independ
 
 - [Recovery of original roadmap + ticket snapshot](../sources/recovered/08_Implementation_Roadmap_Project_Control_RECOVERED.md).
 - [M00-02 Technical Discovery](../discovery/TECHNICAL_DISCOVERY_REPORT.md) - confirmed environment constraints, not current machine runtime proof.
-- [Current requirements consolidation](../requirements/M01_CURRENT_REQUIREMENTS.md) - current decisions, document approval pending.
+- [Current requirements consolidation](../requirements/M01_CURRENT_REQUIREMENTS.md) - current decisions, Owner-accepted repository consolidation; source gaps still recorded.
 - [Traceability & Risks](../verification/TRACEABILITY_AND_RISKS.md) - unresolved validation obligations.
 
 **No currently authenticated live Project Control/Jira snapshot was retrieved.** This file must not be presented as a newly Owner-signed or dynamically updated Implementation Roadmap authority document.

@@ -2,7 +2,9 @@
 
 ASEP is a personal, self-hosted engineering project exploring reliable AI-assisted Software Development Lifecycle (SDLC) workflows. The first implementation milestone (M01) is an AI Merge Request Reviewer for GitLab.
 
-**Current repository purpose:** M00-04 Repository Foundation & Documentation Adoption. This package establishes documentation only. It does not contain a working application, deployed integrations, tested AI inference, or a completed M01.
+**Current repository purpose:** M00-04 Repository Foundation & Documentation Adoption.
+
+**Documentation acceptance:** On 2026-10-18, the Owner accepted the consolidated repository documentation baseline, subject to the provenance, supersession, and OPEN/NOT VERIFIED limitations recorded in [docs/INDEX.md](docs/INDEX.md). This package establishes documentation only. It does not contain a working application, deployed integrations, tested AI inference, or a completed M01.
 
 ## Product vision
 
@@ -17,10 +19,10 @@ For M01, ASEP detects GitLab MR revisions, performs local-only AI review, presen
 | Read this | Purpose |
 |---|---|
 | [Document index](docs/INDEX.md) | Document authority, status, precedence and provenance |
-| [Current M01 requirements](docs/requirements/M01_CURRENT_REQUIREMENTS.md) | Proposed consolidation of approved requirements/amendments; **awaiting Owner review** |
+| [Current M01 requirements](docs/requirements/M01_CURRENT_REQUIREMENTS.md) | Owner-accepted repository consolidation of approved requirements/amendments; original CR-001/Viewer full texts still missing |
 | [Historical requirements v0.1](docs/requirements/v0.1/M01_MVP_SCOPE.md) | Owner-approved 2026-10-15 record; portions superseded |
 | [Technical Discovery](docs/discovery/TECHNICAL_DISCOVERY_REPORT.md) | Owner-approved 2026-10-16 discovery and operational constraints |
-| [System architecture](docs/architecture/ARCHITECTURE.md) | Proposed consolidation of approved architecture design |
+| [System architecture](docs/architecture/ARCHITECTURE.md) | Owner-accepted repository consolidation of approved architecture design (design level only) |
 | [ADR-001](docs/architecture/adr/ADR-001.md) and [ADR-002](docs/architecture/adr/ADR-002.md) | Approved architectural decisions with explicit provenance limits |
 | [Decision register](docs/governance/DECISIONS.md) | ADR/MD/TSE decisions, approval scopes and deferrals |
 | [Roadmap snapshot](docs/governance/IMPLEMENTATION_ROADMAP.md) | Approved milestone direction; status snapshot is not live Project Control |

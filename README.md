@@ -1,4 +1,13 @@
 # ASEP — Agentic Software Engineering Platform
+<!-- ASEP_VNEXT_2026_10_22_START -->
+**Current vNext direction (Owner-selected 2026-10-22; docs adoption and runtime evidence still pending):** Prioritize one bounded eligible Jira ticket → independently verified **GitLab Draft MR**. Automatic internal stage progression is Owner-scoped/default-deny; **human merge only**. Existing M01 reviewer rules and historic status are preserved.
+
+**Technology:** Application = Next.js + Java/Spring Boot + Keycloak; Orchestration = Go + PostgreSQL minimal durable state/queue; Agent Execution = Python + OpenHands behind restricted execution and independent verifier controller/test sandbox. Initial inference remains **local-only**. River, Temporal, MariaDB, cloud AI and automatic merge are **not** initial dependencies.
+
+**vNext docs:** [Decision log](docs/governance/vnext/DECISION_LOG.md) · [Change proposal](docs/governance/vnext/CHANGE_PROPOSAL.md) · [Requirements](docs/requirements/vnext/MVP_SCOPE.md) · [Architecture](docs/architecture/vnext/SYSTEM_ARCHITECTURE.md) · [Execution contracts](docs/architecture/vnext/EXECUTION_CONTRACTS_AND_GATES.md) · [Roadmap proposal](docs/governance/vnext/ROADMAP_PROPOSAL.md) · [Documentation index](docs/INDEX.md).
+
+**Pending gates:** Jira-read egress/data policy, model+sandbox/verifier evidence, Go fault tests and GitLab CI/Code Delivery reconciliation remain OPEN. This new direction does **not** assert that Ubuntu repo updates, PoC or any implementation has completed. Historical M00/M01 introduction below is retained as prior baseline context.
+<!-- ASEP_VNEXT_2026_10_22_END -->
 
 ASEP is a personal, self-hosted engineering project exploring reliable AI-assisted Software Development Lifecycle (SDLC) workflows.
 
@@ -25,7 +34,7 @@ ASEP is a personal engineering and learning project, not a production SaaS platf
 
 ## 2. Current Implementation
 
-The repository contains the initial application foundation introduced during **M01-02 — Application Bootstrap & Local Development Environment**.
+The repository contains the M01-02 application foundation and the M01-03 GitLab read adapter contracts, implementations, and tests (merged into main via PR #2, commit `e4cf94a`).
 
 | Component | Technology | Current capability |
 |---|---|---|
@@ -36,7 +45,7 @@ The repository contains the initial application foundation introduced during **M
 
 Both applications have passed initial local build and runtime verification.
 
-**Implementation boundary:** The current foundation is not a functioning AI Merge Request Reviewer. GitLab integration, authentication, AI inference, background processing, and publication workflows have not been implemented.
+**Implementation boundary:** ASEP is not yet a functioning AI Merge Request Reviewer. M01-03 provides GitLab read adapters and tests, but end-to-end GitLab connectivity, authentication, AI inference, background processing, and publication workflows have not been verified as implemented.
 
 Application bootstrap verification does not establish completion of milestone M01.
 

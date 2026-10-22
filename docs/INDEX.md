@@ -1,4 +1,21 @@
 # ASEP Documentation Index and Authority Rules
+<!-- ASEP_VNEXT_2026_10_22_START -->
+**vNext navigation — Owner directions selected 2026-10-22; live Git adoption remains to be recorded.** This is additive to the 2026-10-18 Owner-accepted M00/M01 documentation baseline; it does not replace historical/recovered sources.
+
+| vNext document | Role / current status |
+|---|---|
+| [Decision log](governance/vnext/DECISION_LOG.md) | P-01/P-02/P-03, Go/PostgreSQL, Python/OpenHands accepted directions; engineering details OPEN |
+| [Change proposal](governance/vnext/CHANGE_PROPOSAL.md) | Explicit scope supersession; **Jira read-egress amendment proposed, not yet approved for real use** |
+| [MVP requirements](requirements/vnext/MVP_SCOPE.md) | Bounded Jira→verified Draft MR outcome; existing M01 requirements still authoritative for review/publication |
+| [System architecture](architecture/vnext/SYSTEM_ARCHITECTURE.md) | Application (Java), Go Orchestrator and Python/OpenHands Agent Platform |
+| [Execution contracts](architecture/vnext/EXECUTION_CONTRACTS_AND_GATES.md) | Candidate admission/state/evidence/sandbox/Code Delivery contracts; future gates and tests OPEN |
+| [ADRs](architecture/adr/vnext/ADR-VN-01-COMPONENT-BOUNDARIES.md) | vNext-specific ADR-VN-01..04; ADR-001/002 historical decisions preserved |
+| [Verification](verification/vnext/TRACEABILITY_AND_RISKS.md) | VNX-V01..15 and fault plans OPEN; M01 V-01..14 remain OPEN |
+| [Roadmap proposal](governance/vnext/ROADMAP_PROPOSAL.md) | P-01 priority, security/contract prerequisites; Project Control ticket mapping pending |
+| [Adoption checklist](governance/vnext/ADOPTION_CHECKLIST.md) | Docs-vs-execution gate separation, live Git diff required |
+
+**Precedence:** vNext changes apply only to the new bounded Jira-to-Draft-MR scope once adopted. M01 reviewer, CR-001 Shadow/Auto-Publish, Viewer amendment, publication/retention constraints and open risks retain their existing effective scope. No Go, SDK, database, remote-write or GPU behavior is claimed VERIFIED by these documents.
+<!-- ASEP_VNEXT_2026_10_22_END -->
 
 **Prepared for:** M00-04 Repository Foundation & Documentation Adoption  
 **Prepared:** 2026-10-18  

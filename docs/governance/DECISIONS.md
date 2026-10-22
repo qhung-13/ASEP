@@ -1,4 +1,18 @@
 # ASEP M01 - Architecture Decision Register (Consolidated v0.1)
+<!-- ASEP_VNEXT_2026_10_22_START -->
+## vNext — Owner-selected directions and engineering gates (2026-10-22)
+
+This is an **additive vNext-specific decision layer**. It does not backdate or rewrite ADR-001/002, MD-01..10, TSE-01..06C, the effective M01 reviewer requirements or historical roadmap/ticket statuses.
+
+- **Owner-selected:** P-01 eligible Jira→verified Draft MR vertical-slice priority; P-02 scoped, evidence-gated internal automation with human merge; P-03 local-only inference and deferred Claude/cloud. **Go + PostgreSQL custom minimal orchestrator** and **Python + OpenHands SDK agent execution** selected for vNext research/engineering direction. Application retains Next.js + Java/Spring Boot/Keycloak.
+- **Engineering proposals (not individually Owner-approved API/schema/permission implementations):** domain-owned PostgreSQL schemas/roles, internal REST/JSON, Go pull/claim/lease contracts, separate trusted verifier test sandbox and Code Delivery branch/MR ledger.
+- **OPEN policy delta:** the historical SEC-009 egress rule did **not** already authorize Jira Cloud; a narrow Java-only Jira-read exception and new Jira/agent data classes/retention/Viewer policy require confirmation before real-data access. Local-only/no-telemetry remains binding.
+- **OPEN evidence:** no sandbox, Go concurrency, agent quality, model/VRAM, GitLab CI/remote-write reconciliation or cross-service authentication has been runtime verified.
+
+[vNext decision log](vnext/DECISION_LOG.md) · [scope change](vnext/CHANGE_PROPOSAL.md) · [requirements](../requirements/vnext/MVP_SCOPE.md) · [architecture](../architecture/vnext/SYSTEM_ARCHITECTURE.md) · [execution contracts](../architecture/vnext/EXECUTION_CONTRACTS_AND_GATES.md) · [ADRs](../architecture/adr/vnext/ADR-VN-01-COMPONENT-BOUNDARIES.md) · [verification](../verification/vnext/TRACEABILITY_AND_RISKS.md) · [roadmap](vnext/ROADMAP_PROPOSAL.md).
+
+The corrected documentation package must pass **live Git patch/diff review and Owner adoption** before any authorized PoC or product implementation; no automatically changed ticket state or code is implied.
+<!-- ASEP_VNEXT_2026_10_22_END -->
 
 > **Repository-document status: OWNER-ACCEPTED REGISTER CONSOLIDATION (2026-10-18; M00-04).**
 > **Approved source decisions:** ADR-001/002; MD-01..10; TSE-01..06C at their *individual* approval scopes, consolidated in M00-03. The register structure was accepted by the Owner on 2026-10-18.  

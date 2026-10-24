@@ -1,0 +1,45 @@
+name: asep
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: asep
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d asep"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    mem_limit: 768m
+    cpus: "1.5"
+    pids_limit: 128
+    restart: unless-stopped
+
+  flyway:
+    image: flyway/flyway:11
+    profiles: ["tools"]
+    user: "0:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets:
+      - flyway_config
+    volumes:
+      - ./db/migrations:/flyway/sql:ro
+    command: ["-configFiles=/run/secrets/flyway_config", "migrate"]
+
+volumes:
+  postgres_data:
+
+secrets:
+  db_password:
+    file: ${HOME}/.local/share/asep/dev/secrets/db_password
+  flyway_config:
+    file: ${HOME}/.local/share/asep/dev/secrets/flyway.conf

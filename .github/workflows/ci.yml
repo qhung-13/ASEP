@@ -74,3 +74,29 @@ jobs:
 
       - name: Production build
         run: pnpm build
+
+  orchestrator:
+    name: Orchestrator (Go + PostgreSQL integration)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    defaults:
+      run:
+        working-directory: orchestrator
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: orchestrator/go.sum
+
+      - name: Run disposable PostgreSQL/Flyway/Go verification
+        env:
+          ASEP_VN_T10_DISPOSABLE_DB: "true"
+        run: bash scripts/ci_verify.sh

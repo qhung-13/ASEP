@@ -1,8 +1,3 @@
-
-<div align="center">
-
----
-
 ## What is ASEP?
 
 ASEP is a personal engineering project exploring how AI agents can participate in the software development lifecycle **without being trusted to approve their own work**.

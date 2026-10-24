@@ -47,7 +47,7 @@ docker run --rm -d --name "$container" \
 
 ready=false
 for _ in $(seq 1 50); do
-  if docker exec "$container" pg_isready -U postgres -d asep >/dev/null 2>&1; then
+  if docker exec "$container" pg_isready -h 127.0.0.1 -U postgres -d asep >/dev/null 2>&1; then
     ready=true
     break
   fi

@@ -1,275 +1,157 @@
-# ASEP — Agentic Software Engineering Platform
-<!-- ASEP_VNEXT_2026_10_22_START -->
-**Current vNext direction (Owner-selected 2026-10-22; docs adoption and runtime evidence still pending):** Prioritize one bounded eligible Jira ticket → independently verified **GitLab Draft MR**. Automatic internal stage progression is Owner-scoped/default-deny; **human merge only**. Existing M01 reviewer rules and historic status are preserved.
 
-**Technology:** Application = Next.js + Java/Spring Boot + Keycloak; Orchestration = Go + PostgreSQL minimal durable state/queue; Agent Execution = Python + OpenHands behind restricted execution and independent verifier controller/test sandbox. Initial inference remains **local-only**. River, Temporal, MariaDB, cloud AI and automatic merge are **not** initial dependencies.
+<div align="center">
 
-**vNext docs:** [Decision log](docs/governance/vnext/DECISION_LOG.md) · [Change proposal](docs/governance/vnext/CHANGE_PROPOSAL.md) · [Requirements](docs/requirements/vnext/MVP_SCOPE.md) · [Architecture](docs/architecture/vnext/SYSTEM_ARCHITECTURE.md) · [Execution contracts](docs/architecture/vnext/EXECUTION_CONTRACTS_AND_GATES.md) · [Roadmap proposal](docs/governance/vnext/ROADMAP_PROPOSAL.md) · [Documentation index](docs/INDEX.md).
+---
 
-**Pending gates:** Jira-read egress/data policy, model+sandbox/verifier evidence, Go fault tests and GitLab CI/Code Delivery reconciliation remain OPEN. This new direction does **not** assert that Ubuntu repo updates, PoC or any implementation has completed. Historical M00/M01 introduction below is retained as prior baseline context.
-<!-- ASEP_VNEXT_2026_10_22_END -->
+## What is ASEP?
 
-ASEP is a personal, self-hosted engineering project exploring reliable AI-assisted Software Development Lifecycle (SDLC) workflows.
+ASEP is a personal engineering project exploring how AI agents can participate in the software development lifecycle **without being trusted to approve their own work**.
 
-The project aims to build an enterprise-inspired AI engineering platform while developing practical skills in backend architecture, full-stack engineering, AI engineering, testing, security, and DevOps.
+The platform brings together issue investigation, planning, sandboxed code changes, independent verification, GitLab delivery, and AI-assisted code review. Its goal is not just to generate patches, but to make the process **traceable, recoverable, and controlled by the developer**.
 
-The first implementation milestone, **M01 — AI Merge Request Reviewer**, focuses on GitLab Merge Request code review using local AI inference and controlled publication.
+The first integrated workflow focuses on a single eligible Jira issue and ends with a verified **GitLab Draft MR**. The longer-term platform also includes an AI Merge Request Reviewer and a human-controlled merge process.
 
-## 1. Project Vision
+## How it works
 
-The long-term target workflow is:
-
-`Jira Ticket → Investigation → Planning → Human Approval → Implementation → Testing → GitLab Draft MR → AI Code Review → Human Merge`
-
-ASEP is designed around several core principles:
-
-- Human oversight for consequential operations.
-- Evidence-based and actionable AI findings.
-- Secure, local-only inference over source code.
-- Durable, recoverable workflow execution.
-- Explicit module boundaries and testable architecture.
-- No automatic merging into protected branches.
-
-ASEP is a personal engineering and learning project, not a production SaaS platform.
-
-## 2. Current Implementation
-
-The repository contains the M01-02 application foundation and the M01-03 GitLab read adapter contracts, implementations, and tests (merged into main via PR #2, commit `e4cf94a`).
-
-| Component | Technology | Current capability |
-|---|---|---|
-| Backend | Java 21, Spring Boot 4.1.1, Spring Modulith 2.1.1 | Application bootstrap, Actuator health, foundational tests |
-| Frontend | Next.js 16.4.2, React, TypeScript | App Router, minimal ASEP landing page |
-| Backend build | Maven Wrapper | Reproducible Maven execution and JAR packaging |
-| Frontend tooling | Corepack + pnpm | Dependency installation, linting, type checking, production build |
-
-Both applications have passed initial local build and runtime verification.
-
-**Implementation boundary:** ASEP is not yet a functioning AI Merge Request Reviewer. M01-03 provides GitLab read adapters and tests, but end-to-end GitLab connectivity, authentication, AI inference, background processing, and publication workflows have not been verified as implemented.
-
-Application bootstrap verification does not establish completion of milestone M01.
-
-## 3. Repository Structure
-
-```text
-ASEP/
-├── backend/           # Spring Boot + Spring Modulith
-├── frontend/          # Next.js App Router + TypeScript
-├── docs/
-│   ├── architecture/  # System architecture and ADRs
-│   ├── development/   # Local development documentation
-│   ├── discovery/     # Technical discovery
-│   ├── governance/    # Decisions and roadmap snapshot
-│   ├── requirements/  # Current and historical requirements
-│   ├── sources/       # Recovered historical sources
-│   └── verification/  # Traceability and open risks
-├── .gitignore
-└── README.md
+```mermaid
+flowchart LR
+    A["Jira issue"] --> B["Investigate & plan"]
+    B --> C["Implement in sandbox"]
+    C --> D["Independent verification"]
+    D --> E["GitLab Draft MR"]
+    E --> F["AI code review"]
+    F --> G["Human review & merge"]
 ```
 
-The backend and frontend are separate applications in one repository.
+Internal stages may advance automatically **only within an Owner-authorized policy** and after required evidence checks. ASEP never automatically approves or merges changes.
 
-The backend follows the approved modular monolith direction, with a single codebase intended to support independently running API and Worker process roles.
+## Features
 
-These separate runtime roles and the M01 business modules are not yet implemented.
+- **Jira-driven development** — Select an eligible issue and gather relevant repository context before planning changes.
+- **Local coding agents** — Use OpenHands SDK with a local LLM for investigation, planning, and constrained implementation.
+- **Isolated execution** — Run agent-controlled commands in restricted workspaces instead of giving generated code access to the host or privileged credentials.
+- **Independent verification** — Validate the exact candidate with a trusted controller and protected tests; never treat an agent's `PASS` message as proof.
+- **Durable workflows** — Coordinate tasks, retries, cancellation, leases, fencing, and crash recovery through a Go orchestrator backed by PostgreSQL.
+- **Controlled GitLab delivery and review** — Create authorized Draft MRs, support evidence-based AI review, and leave approval and merging to humans.
 
-## 4. Local Development
+These describe the **target platform capabilities**, not a claim that the entire workflow is already implemented.
 
-ASEP is developed on Ubuntu using a localhost-first environment.
+## Architecture
 
-### Prerequisites
+ASEP separates application permissions, workflow authority, and agent execution so that a model cannot directly change authoritative state or perform privileged GitLab operations.
 
-- Java JDK 21
-- Node.js 24
-- Corepack
-- pnpm 12.11.2
+```mermaid
+flowchart TB
+    DEV["Developer"] --> UI["Next.js Web UI / BFF"]
+    UI <-->|"OIDC"| KC["Keycloak"]
+    UI --> APP["Java / Spring Boot Application"]
 
-The backend uses Maven Wrapper, so a global Maven installation is not required.
+    APP <-->|"Authorized commands & status"| GO["Go Orchestrator"]
+    GO <-->|"Scoped tasks & results"| AGENT["Python / OpenHands Supervisor"]
 
-### Backend
+    AGENT --> LLM["Ollama / Local LLM"]
+    AGENT --> CODE["Restricted Coding Sandbox"]
+    CODE --> SEAL["Trusted Candidate Sealing"]
+    SEAL --> VERIFY["Independent Verifier Controller"]
+    VERIFY --> TEST["Isolated Test Sandbox"]
+    TEST --> VERIFY
+    VERIFY -->|"Trusted evidence"| GO
 
-From the repository root:
+    APP -->|"Scoped reads"| JIRA["Jira"]
+    APP -->|"Authorized Draft MR & review operations"| GITLAB["GitLab"]
+    APP <--> DB[("PostgreSQL")]
+    GO <--> DB
+```
+
+| Component                  | Technology                                      | Responsibility                                                         |
+| -------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------- |
+| Web application            | Next.js, TypeScript                             | UI, authenticated sessions, workflow visibility                        |
+| Application & integrations | Java, Spring Boot, Spring Modulith              | Business authorization, Jira/GitLab adapters, trusted external actions |
+| Orchestration              | Go, PostgreSQL                                  | Durable workflow state, scheduling, retries, leases, recovery          |
+| Agent execution            | Python, OpenHands SDK, Ollama                   | Local reasoning, scoped tools, code changes                            |
+| Verification               | Restricted Docker sandboxes, trusted controller | Candidate sealing, protected tests, independent verdicts               |
+| Identity & infrastructure  | Keycloak, PostgreSQL, Docker                    | Service identity, data boundaries, isolated runtimes                   |
+
+> **Design boundary:** The diagram shows the intended platform architecture. The existing application can be run locally; the full three-component workflow is still under development.
+
+## Quick start
+
+The commands below start the **existing Spring Boot backend and Next.js frontend**. They do not yet launch the complete Jira-to-Draft-MR pipeline.
+
+**Requirements:** Ubuntu, Java 21, Node.js 24, Corepack, and pnpm 12.11.2. The backend includes Maven Wrapper.
+
+**1. Start the API** (from the repository root):
 
 ```bash
 cd backend
-
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 export PATH="$JAVA_HOME/bin:$PATH"
-
 ./mvnw spring-boot:run
 ```
 
-Default backend address:
+API: `http://127.0.0.1:8080` · Health: `http://127.0.0.1:8080/actuator/health`
 
-`http://127.0.0.1:8080`
-
-Health endpoint:
-
-`http://127.0.0.1:8080/actuator/health`
-
-The backend is configured to bind to `127.0.0.1` by default.
-
-### Frontend
-
-In a separate terminal, from the repository root:
+**2. Start the web app** (in another terminal, from the repository root):
 
 ```bash
 cd frontend
-
 corepack pnpm install
 corepack pnpm dev --hostname 127.0.0.1 --port 3000
 ```
 
-Frontend address:
+Open `http://127.0.0.1:3000`.
 
-`http://127.0.0.1:3000`
-
-The explicit hostname argument restricts the development server to localhost.
-
-### Testing and Builds
-
-Backend:
+**Run the existing checks** (from the repository root):
 
 ```bash
-cd backend
-./mvnw verify
+(cd backend && ./mvnw --batch-mode --no-transfer-progress clean verify)
+(cd frontend && corepack pnpm lint && corepack pnpm exec next typegen && corepack pnpm exec tsc --noEmit && corepack pnpm build)
 ```
 
-Frontend:
+For complete development instructions, see the [Local Development Guide](docs/development/LOCAL_DEVELOPMENT.md).
 
-```bash
-cd frontend
+## Project structure
 
-corepack pnpm lint
-corepack pnpm exec next typegen
-corepack pnpm exec tsc --noEmit
-corepack pnpm build
+ASEP is organized around distinct application, orchestration, and agent-execution responsibilities. The layout below shows the **intended component homes**, not an exact listing of files currently on `main`. Directories marked `planned` will be established as their code is implemented.
+
+```text
+ASEP/
+├── backend/                # Java / Spring Boot Application & trusted integrations
+├── frontend/               # Next.js web application
+├── orchestrator/           # Go workflow engine and PostgreSQL queue (planned)
+├── agent-runtime/          # Python / OpenHands adapter and supervisor (planned)
+├── verification/           # Trusted verifier and controlled fixtures (planned)
+├── contracts/              # Versioned cross-component API schemas (planned)
+├── infra/                  # Compose, sandbox and identity config (planned)
+├── docs/
+│   ├── architecture/       # System architecture and ADRs
+│   ├── requirements/       # Product requirements
+│   ├── governance/         # Decision records
+│   ├── verification/       # Verification specifications
+│   └── development/        # Developer setup and conventions
+├── .github/workflows/      # GitHub Actions CI
+└── README.md
 ```
 
-For complete setup instructions, tooling details, configuration conventions, and verification limitations, see the **[Local Development Guide](docs/development/LOCAL_DEVELOPMENT.md)**.
+## Engineering principles
 
-## 5. Architectural Direction
+- **Local-first by default:** no cloud-model fallback in the initial scope.
+- **Least privilege:** agent tools and test processes cannot inherit Jira/GitLab write tokens or access the Docker host socket.
+- **Evidence before progression:** generated code is independently tested against the exact candidate revision.
+- **Recovery over guesswork:** uncertain external outcomes are recorded and reconciled, not blindly retried.
+- **Human control:** no autonomous merge, approval, protected-branch writes, or deployment.
 
-ASEP follows the architecture and technology decisions approved during M00.
+Detailed security and execution obligations live in the architecture documentation rather than in this README.
 
-| Area | Approved direction |
-|---|---|
-| Frontend | Next.js App Router + TypeScript; confidential OIDC BFF design |
-| Backend | Java + Spring Boot + Spring Modulith |
-| Architecture | Modular Monolith with separate API/Worker processes |
-| Persistence | PostgreSQL durable relational state |
-| Background execution | PostgreSQL-backed durable workflows and handoff |
-| Identity | Self-hosted Keycloak; ASEP-managed business authorization |
-| Authentication | OIDC Authorization Code + PKCE; Spring Security Resource Server |
-| AI inference | Replaceable local-only inference port |
-| Deployment | Single Ubuntu host; Docker Compose initial direction |
+## Documentation
 
-These are approved architectural and technology directions, not evidence that every component has been implemented or validated.
+- [Documentation Index](docs/INDEX.md)
+- [vNext Product Requirements](docs/requirements/vnext/MVP_SCOPE.md)
+- [System Architecture](docs/architecture/vnext/SYSTEM_ARCHITECTURE.md)
+- [Execution Contracts &amp; Security Gates](docs/architecture/vnext/EXECUTION_CONTRACTS_AND_GATES.md)
+- [Architecture Decisions](docs/architecture/adr/vnext/ADR-VN-01-COMPONENT-BOUNDARIES.md)
+- [Local Development Guide](docs/development/LOCAL_DEVELOPMENT.md)
 
-Exact scheduler, persistence schema, ORM/SQL boundaries, AI runtime/model, authentication session details, and deployment topology remain subject to their documented decisions and verification requirements.
+---
 
-### Business Module Boundaries
-
-The M01 architecture identifies six logical business modules:
-
-1. Identity & Access
-2. Integration Management
-3. MR Detection
-4. Review
-5. Publication
-6. Evaluation
-
-The architecture keeps Review and Publication responsibilities separate.
-
-Review completion does not independently authorize GitLab publication.
-
-Business modules will be introduced when their functionality is implemented, rather than scaffolding empty modules prematurely.
-
-## 6. M01 Requirements and Safety Boundaries
-
-The current M01 requirements incorporate the approved Requirements v0.2 / CR-001 and Viewer Global Full Read-Only Amendment.
-
-Important requirements and architectural constraints include:
-
-- GitLab API polling with revision-aware MR detection and review admission.
-- Local-only AI inference without external AI providers by default.
-- Evidence-backed findings with explicit coverage and provenance limitations.
-- Shadow Mode without GitLab publication.
-- Manual publication requiring exact Owner approval.
-- Conditional Auto-Publish, disabled by default, requiring Owner-enabled policy and independent quality/safety gates.
-- Backend-enforced Owner/Viewer authorization, including Viewer Global Full Read-Only within its approved data scope.
-- Freshness validation before external publication.
-- Publication Ledger and reconciliation for ambiguous GitLab write outcomes.
-- Durable execution, bounded retries, cancellation, and recoverable failure states.
-- Retention, credential security, and restricted network egress.
-- No automatic GitLab MR approval or merge.
-
-Source code, Merge Request content, model responses, and external tool outputs must be treated as untrusted inputs.
-
-**These are requirements and design constraints. They must not be interpreted as controls already enforced by the current application foundation.**
-
-## 7. Verification Status and Limitations
-
-Initial M01-02 verification evidence includes:
-
-| Verification | Observed result |
-|---|---|
-| Backend application context test | PASS |
-| Spring Modulith architecture verification test | PASS |
-| Backend Maven tests | 2 passed, 0 failures |
-| Backend Maven `verify` | BUILD SUCCESS |
-| Executable JAR packaging | PASS |
-| Backend health endpoint | HTTP 200, status `UP` |
-| Backend localhost binding | Verified |
-| Frontend ESLint | PASS |
-| Frontend TypeScript | PASS |
-| Frontend production build | PASS |
-| Frontend HTTP response | HTTP 200 |
-| Frontend landing page | Manually confirmed |
-
-The Spring Modulith architecture test currently verifies the foundational architecture inspection mechanism. It does not yet establish valid dependency boundaries between actual business modules.
-
-A fresh-clone reproducibility test has not been independently verified.
-
-The current foundation does not demonstrate end-to-end GitLab review, local AI inference quality, secure authentication, durable Worker recovery, or safe publication.
-
-Architecture verification items V-01 through V-14 remain OPEN / NOT VERIFIED unless separately closed with accepted runtime evidence.
-
-## 8. Documentation
-
-On **2026-10-18**, the Project Owner accepted the consolidated repository documentation baseline created during M00-04, subject to its documented provenance, supersession, and verification limitations.
-
-At the time of M00-04 acceptance, the repository contained documentation only. Application foundation development began afterward during M01-02.
-
-| Document | Purpose |
-|---|---|
-| [Documentation Index](docs/INDEX.md) | Document authority, precedence, provenance, and source limitations |
-| [Local Development Guide](docs/development/LOCAL_DEVELOPMENT.md) | Tooling, startup, tests, builds, and localhost configuration |
-| [Current M01 Requirements](docs/requirements/M01_CURRENT_REQUIREMENTS.md) | Owner-accepted consolidation of effective requirements and amendments |
-| [Historical M01 Scope v0.1](docs/requirements/v0.1/M01_MVP_SCOPE.md) | Historical approved requirements, partially superseded |
-| [Technical Discovery Report](docs/discovery/TECHNICAL_DISCOVERY_REPORT.md) | Development environment and operational/security constraints |
-| [System Architecture](docs/architecture/ARCHITECTURE.md) | Approved design direction and module/process boundaries |
-| [ADR-001](docs/architecture/adr/ADR-001.md) | Modular Monolith with Separate Worker Processes |
-| [ADR-002](docs/architecture/adr/ADR-002.md) | Durable Workflow and Publication Boundaries |
-| [Decision Register](docs/governance/DECISIONS.md) | Architecture, module, and technology decisions |
-| [Roadmap Snapshot](docs/governance/IMPLEMENTATION_ROADMAP.md) | Historical milestone direction; not live Project Control |
-| [Traceability and Risks](docs/verification/TRACEABILITY_AND_RISKS.md) | Requirement mapping and outstanding verification work |
-| [Recovered Source Inventory](docs/sources/recovered/README_SOURCE_INVENTORY.md) | Historical recovery evidence and missing-source limitations |
-
-Historical approved content must be preserved. Reconstructed records and consolidated repository documents retain the provenance qualifications recorded in the documentation index.
-
-## 9. Development and Governance
-
-ASEP is developed incrementally using a milestone- and ticket-based workflow.
-
-Engineering changes follow:
-
-**Requirements → Investigation → Design → Trade-off Review → Implementation → Testing → Diff Review → Owner Approval → Commit**
-
-Major architectural changes require explicit discussion and appropriate decision records.
-
-Source-code quality, security, observability, recoverability, and reproducible tests take precedence over the number of frameworks or AI agents implemented.
-
-Ticket completion and milestone status are managed separately through Project Control. The repository README and historical roadmap snapshot are not substitutes for live project status tracking.
-
-The long-term goal is a working, maintainable, and verifiable AI engineering platform suitable for a professional software engineering portfolio.
+ASEP is a **personal, actively developed engineering and learning project**, not a production-ready service.

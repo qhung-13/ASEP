@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -247,6 +247,7 @@ for expected in \
   TestHeartbeatDatabaseErrorsRemainDistinctFromLeaseLoss \
   TestResultLockedAcceptance \
   TestResultReplayAndLostApplicationACK \
+  TestResultProcessCrashAfterCommitBeforeACK \
   TestResultConcurrentSubmissions \
   TestResultOperationIdentityAcrossRuns \
   TestResultCommitResponseLoss \
@@ -259,6 +260,13 @@ import sys
 assert sys.argv[2] in open(sys.argv[1]).read().splitlines(), 'required test missing'
 PY
 done
+if [[ "$mode" == rf06-process ]]; then
+  phase='RF-06 repeated process crash after result COMMIT before application ACK'
+  run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
+    -run '^TestResultProcessCrashAfterCommitBeforeACK$' ./internal/workflow
+  echo 'RF-06 process verification PASS: five repetitions, checkpoint control and B0 rejection'
+  exit 0
+fi
 if [[ "$mode" == b2 ]]; then
   phase='B2 locked acceptance, result replay and commit uncertainty'
   run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \

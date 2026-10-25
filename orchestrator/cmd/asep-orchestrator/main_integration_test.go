@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,9 +15,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/qhung-13/ASEP/orchestrator/internal/testsupport"
 	"github.com/qhung-13/ASEP/orchestrator/internal/workflow"
 )
 
@@ -42,7 +43,7 @@ func makeRequest(t *testing.T, client *http.Client, method, url, token string, b
 		}
 		reader = bytes.NewReader(payload)
 	}
-	request, err := http.NewRequest(method, url, reader)
+	request, err := http.NewRequestWithContext(testsupport.Context(t), method, url, reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,64 +66,110 @@ func makeRequest(t *testing.T, client *http.Client, method, url, token string, b
 }
 
 type childService struct {
-	process *exec.Cmd
-	rootURL string
-	logFile *os.File
+	process  *exec.Cmd
+	rootURL  string
+	logFile  *os.File
+	done     chan struct{}
+	stopOnce sync.Once
+	cancel   context.CancelFunc
+	t        *testing.T
+}
+
+func buildChild(t *testing.T) string {
+	t.Helper()
+	goBin := os.Getenv("ASEP_VN_T10_GO_BIN")
+	if goBin == "" {
+		t.Fatal("integration Go tool missing")
+	}
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal("module directory unavailable")
+	}
+	binary := filepath.Join(t.TempDir(), "asep-orchestrator")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	build := exec.CommandContext(ctx, goBin, "build", "-o", binary, "./cmd/asep-orchestrator")
+	build.Dir = root
+	build.Env = testsupport.Environment()
+	build.WaitDelay = 3 * time.Second
+	if err := build.Run(); err != nil {
+		t.Fatal("bounded child build failed")
+	}
+	return binary
 }
 
 func startChild(t *testing.T, binary, prefix string) *childService {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("loopback fixture listener unavailable")
 	}
 	address := l.Addr().String()
 	_ = l.Close()
 	logFile, err := os.CreateTemp(t.TempDir(), "server-*.log")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("private child log unavailable")
 	}
-	process := exec.Command(binary, "serve")
-	process.Env = append(os.Environ(), "ASEP_ORCHESTRATOR_BIND="+address,
-		"ASEP_ORCHESTRATOR_ALLOWED_SUBJECT_PREFIX="+prefix)
-	process.Stdout = logFile
-	process.Stderr = logFile
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	process := exec.CommandContext(ctx, binary, "serve")
+	process.Env = append(testsupport.Environment(), "ASEP_ORCHESTRATOR_BIND="+address,
+		"ASEP_ORCHESTRATOR_ALLOWED_SUBJECT_PREFIX="+prefix,
+		"ASEP_ORCHESTRATOR_DATABASE_URL="+os.Getenv("ASEP_ORCHESTRATOR_DATABASE_URL"),
+		"ASEP_ORCHESTRATOR_DEV_TOKEN_FILE="+os.Getenv("ASEP_ORCHESTRATOR_DEV_TOKEN_FILE"))
+	process.Stdout, process.Stderr = logFile, logFile
+	process.WaitDelay = 3 * time.Second
 	if err = process.Start(); err != nil {
+		cancel()
 		_ = logFile.Close()
-		t.Fatal(err)
+		t.Fatal("child Go service could not start")
 	}
-	rootURL := "http://" + address
+	service := &childService{process: process, rootURL: "http://" + address, logFile: logFile,
+		done: make(chan struct{}), cancel: cancel, t: t}
+	t.Cleanup(service.kill)
+	go func() { _ = process.Wait(); close(service.done) }()
 	client := &http.Client{Timeout: 300 * time.Millisecond}
-	deadline := time.Now().Add(5 * time.Second)
-	ready := false
-	for time.Now().Before(deadline) {
-		response, e := client.Get(rootURL + "/healthz")
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer readyCancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		request, _ := http.NewRequestWithContext(readyCtx, "GET", service.rootURL+"/healthz", nil)
+		response, e := client.Do(request)
 		if e == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == 200 {
-				ready = true
-				break
+				select {
+				case <-service.done:
+					t.Fatal("child exited during readiness")
+				default:
+				}
+				return service
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-readyCtx.Done():
+			t.Fatal("child service readiness deadline exceeded")
+		case <-service.done:
+			t.Fatal("child service exited before readiness")
+		case <-ticker.C:
+		}
 	}
-	service := &childService{process: process, rootURL: rootURL, logFile: logFile}
-	if !ready {
-		service.kill()
-		t.Fatal("child Go service did not become healthy")
-	}
-	return service
 }
 func (s *childService) kill() {
-	if s.process.Process != nil {
+	s.stopOnce.Do(func() {
 		_ = s.process.Process.Kill()
-		_ = s.process.Wait()
-	}
-	_ = s.logFile.Close()
+		s.cancel()
+		select {
+		case <-s.done:
+		case <-time.After(4 * time.Second):
+			s.t.Error("owned child was not reaped within deadline")
+		}
+		_ = s.logFile.Close()
+	})
 }
 func TestProcessCrashRestartKeepsRunAndLease(t *testing.T) {
 	prefix := os.Getenv("ASEP_VN_T10_TEST_PREFIX")
-	dbURL := os.Getenv("ASEP_ORCHESTRATOR_DATABASE_URL")
+	dbURL := testsupport.DatabaseURL(t)
 	tokenPath := os.Getenv("ASEP_ORCHESTRATOR_DEV_TOKEN_FILE")
 	goBin := os.Getenv("ASEP_VN_T10_GO_BIN")
 	if prefix == "" || dbURL == "" || tokenPath == "" || goBin == "" {
@@ -149,32 +196,19 @@ func TestProcessCrashRestartKeepsRunAndLease(t *testing.T) {
 		RepositoryBaseSHA: strings.Repeat("0", 40), TargetBranch: "main", ObservedTargetHeadSHA: strings.Repeat("1", 40),
 		SourceFingerprintSHA256: strings.Repeat("b", 64), PolicyID: "synthetic-policy", PolicyEpoch: 1, BudgetLimit: 3,
 	}
-	receipt, err := store.Admit(context.Background(), cmd)
+	receipt, err := store.Admit(testsupport.Context(t), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Controlled fixture mutation, NOT a production budget-debit path.
 	// A nonzero durable counter prevents a false-positive restart test that
 	// merely checks default budget_used=0 before and after a crash.
-	fixtureDB, err := sql.Open("pgx", dbURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fixtureDB.Close()
-	if _, err = fixtureDB.ExecContext(context.Background(),
+	fixtureDB := testsupport.Database(t)
+	if _, err = fixtureDB.ExecContext(testsupport.Context(t),
 		`UPDATE orchestration.workflow_runs SET budget_used=1 WHERE run_id=$1::uuid`, receipt.RunID); err != nil {
 		t.Fatal(err)
 	}
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	binary := filepath.Join(t.TempDir(), "asep-orchestrator")
-	build := exec.Command(goBin, "build", "-o", binary, "./cmd/asep-orchestrator")
-	build.Dir = root
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build child: %v: %s", err, output)
-	}
+	binary := buildChild(t)
 
 	first := startChild(t, binary, prefix)
 	client := &http.Client{Timeout: 3 * time.Second}

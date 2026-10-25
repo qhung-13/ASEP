@@ -5,6 +5,7 @@ package workflow
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,42 +30,41 @@ func validAdvance(t *testing.T, c Admission, l TaskLease) investigationAdvance {
 }
 
 type transitionSnapshot struct {
-	state                                string
-	version                              int64
-	used                                 int
-	tasks, attempts, transitions, outbox int
-	firstTaskStatus                      string
-	firstAttemptState                    string
+	state                                              string
+	version                                            int64
+	used, limit                                        int
+	tasks, attempts, transitions, outbox, outstanding  int
+	firstTaskStatus, firstTaskClaimant, firstTaskStage string
+	firstTaskEpoch                                     int64
+	firstTaskDeliveries                                int
+	firstTaskExpiry                                    sql.NullTime
+	firstAttemptState                                  string
+	firstAttemptNo                                     int
 }
 
 func snapshotFor(t *testing.T, s *Store, r AdmissionReceipt) transitionSnapshot {
 	t.Helper()
 	var z transitionSnapshot
-	err := s.db.QueryRow(`SELECT state,run_version,budget_used FROM orchestration.workflow_runs WHERE run_id=$1::uuid`, r.RunID).Scan(&z.state, &z.version, &z.used)
+	// A single PostgreSQL statement observes one MVCC snapshot, even if another
+	// controlled writer commits while the test is collecting evidence.
+	err := s.db.QueryRowContext(testContext(t), `
+        SELECT r.state,r.run_version,r.budget_used,r.budget_limit,
+          (SELECT count(*) FROM orchestration.task_deliveries WHERE run_id=r.run_id),
+          (SELECT count(*) FROM orchestration.stage_attempts WHERE run_id=r.run_id),
+          (SELECT count(*) FROM orchestration.workflow_transitions WHERE run_id=r.run_id),
+          (SELECT count(*) FROM orchestration.workflow_outbox WHERE run_id=r.run_id),
+          (SELECT count(*) FROM orchestration.task_deliveries WHERE run_id=r.run_id AND status IN ('QUEUED','LEASED')),
+          t.status,coalesce(t.claimant_id,''),t.stage,t.lease_epoch,t.delivery_count,t.lease_expires_at,
+          a.state,a.semantic_attempt_no
+        FROM orchestration.workflow_runs r
+        JOIN orchestration.task_deliveries t ON t.run_id=r.run_id AND t.task_id=$2::uuid
+        JOIN orchestration.stage_attempts a ON a.run_id=r.run_id AND a.attempt_id=$3::uuid
+        WHERE r.run_id=$1::uuid`, r.RunID, r.TaskID, r.AttemptID).Scan(
+		&z.state, &z.version, &z.used, &z.limit, &z.tasks, &z.attempts, &z.transitions, &z.outbox, &z.outstanding,
+		&z.firstTaskStatus, &z.firstTaskClaimant, &z.firstTaskStage, &z.firstTaskEpoch, &z.firstTaskDeliveries,
+		&z.firstTaskExpiry, &z.firstAttemptState, &z.firstAttemptNo)
 	if err != nil {
-		t.Fatal(err)
-	}
-	queries := []struct {
-		table  string
-		target *int
-	}{
-		{"task_deliveries", &z.tasks}, {"stage_attempts", &z.attempts},
-		{"workflow_transitions", &z.transitions}, {"workflow_outbox", &z.outbox},
-	}
-	for _, q := range queries {
-		// Identifiers are hardcoded, never provided by candidate/untrusted input.
-		err = s.db.QueryRow(`SELECT count(*) FROM orchestration.`+q.table+` WHERE run_id=$1::uuid`, r.RunID).Scan(q.target)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	err = s.db.QueryRow(`SELECT status FROM orchestration.task_deliveries WHERE task_id=$1::uuid`, r.TaskID).Scan(&z.firstTaskStatus)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = s.db.QueryRow(`SELECT state FROM orchestration.stage_attempts WHERE attempt_id=$1::uuid`, r.AttemptID).Scan(&z.firstAttemptState)
-	if err != nil {
-		t.Fatal(err)
+		t.Fatal("consistent workflow evidence snapshot unavailable")
 	}
 	return z
 }
@@ -74,21 +74,22 @@ func checkAdvanced(t *testing.T, s *Store, r AdmissionReceipt, receipt advanceRe
 	z := snapshotFor(t, s, r)
 	if z.state != "PLANNING" || z.version != 2 || z.used != 0 ||
 		z.tasks != 2 || z.attempts != 2 || z.transitions != 2 || z.outbox != 2 ||
-		z.firstTaskStatus != "COMPLETED" || z.firstAttemptState != "SUCCEEDED" {
+		z.firstTaskStatus != "COMPLETED" || z.firstAttemptState != "SUCCEEDED" ||
+		z.firstAttemptNo != 1 || z.outstanding != 1 || z.firstTaskEpoch < 1 || z.firstTaskClaimant == "" {
 		t.Fatalf("invalid atomic successor snapshot: %+v", z)
 	}
 	var nextStatus, nextAttemptState string
-	err := s.db.QueryRow(`SELECT status FROM orchestration.task_deliveries WHERE task_id=$1::uuid`, receipt.NextTaskID).Scan(&nextStatus)
+	err := s.db.QueryRowContext(testContext(t), `SELECT status FROM orchestration.task_deliveries WHERE task_id=$1::uuid`, receipt.NextTaskID).Scan(&nextStatus)
 	if err != nil || nextStatus != "QUEUED" {
 		t.Fatalf("next task: status=%s err=%v", nextStatus, err)
 	}
-	err = s.db.QueryRow(`SELECT state FROM orchestration.stage_attempts WHERE attempt_id=$1::uuid`, receipt.NextAttemptID).Scan(&nextAttemptState)
+	err = s.db.QueryRowContext(testContext(t), `SELECT state FROM orchestration.stage_attempts WHERE attempt_id=$1::uuid`, receipt.NextAttemptID).Scan(&nextAttemptState)
 	if err != nil || nextAttemptState != "PENDING" {
 		t.Fatalf("next attempt: state=%s err=%v", nextAttemptState, err)
 	}
 	var eventRaw []byte
 	var sha string
-	err = s.db.QueryRow(`SELECT payload,payload_sha256 FROM orchestration.workflow_outbox WHERE message_id=$1::uuid`, receipt.OutboxMessageID).Scan(&eventRaw, &sha)
+	err = s.db.QueryRowContext(testContext(t), `SELECT payload,payload_sha256 FROM orchestration.workflow_outbox WHERE message_id=$1::uuid`, receipt.OutboxMessageID).Scan(&eventRaw, &sha)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func checkAdvanced(t *testing.T, s *Store, r AdmissionReceipt, receipt advanceRe
 		t.Fatalf("outbox logical JSON digest mismatch")
 	}
 	var pending int
-	err = s.db.QueryRow(`SELECT count(*) FROM orchestration.task_deliveries WHERE run_id=$1::uuid AND status IN ('QUEUED','LEASED')`, r.RunID).Scan(&pending)
+	err = s.db.QueryRowContext(testContext(t), `SELECT count(*) FROM orchestration.task_deliveries WHERE run_id=$1::uuid AND status IN ('QUEUED','LEASED')`, r.RunID).Scan(&pending)
 	if err != nil || pending != 1 {
 		t.Fatalf("outstanding tasks=%d err=%v", pending, err)
 	}
@@ -126,11 +127,11 @@ func checkAdvanced(t *testing.T, s *Store, r AdmissionReceipt, receipt advanceRe
 func TestAdvanceInvestigationAtomicSuccessor(t *testing.T) {
 	s := storeForTest(t)
 	c, r := admitForTest(t, s, "advance-success")
-	lease, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-stage-worker", 30)
+	lease, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-stage-worker", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := s.advanceInvestigation(context.Background(), validAdvance(t, c, lease))
+	receipt, err := s.advanceInvestigation(testContext(t), validAdvance(t, c, lease))
 	if err != nil {
 		t.Fatalf("advance investigation: %v", err)
 	}
@@ -138,10 +139,10 @@ func TestAdvanceInvestigationAtomicSuccessor(t *testing.T) {
 		t.Fatalf("invalid receipt: %+v", receipt)
 	}
 	checkAdvanced(t, s, r, receipt)
-	if _, err = s.Heartbeat(context.Background(), lease, 10); !errors.Is(err, ErrLeaseLost) {
+	if _, err = s.Heartbeat(testContext(t), lease, 10); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("completed lease still valid: %v", err)
 	}
-	next, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-planner", 30)
+	next, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-planner", 30)
 	if err != nil || next.Stage != "PLANNING" || next.TaskID != receipt.NextTaskID {
 		t.Fatalf("next task cannot be claimed: %+v %v", next, err)
 	}
@@ -150,7 +151,7 @@ func TestAdvanceInvestigationAtomicSuccessor(t *testing.T) {
 func TestAdvanceInvestigationRejectsStaleAndTamperedAuthority(t *testing.T) {
 	s := storeForTest(t)
 	c, r := admitForTest(t, s, "advance-rejections")
-	lease, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-stage-worker", 30)
+	lease, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-stage-worker", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func TestAdvanceInvestigationRejectsStaleAndTamperedAuthority(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			altered := valid
 			tc.change(&altered)
-			_, err := s.advanceInvestigation(context.Background(), altered)
+			_, err := s.advanceInvestigation(testContext(t), altered)
 			if !errors.Is(err, ErrLeaseLost) && !errors.Is(err, ErrTransitionRejected) {
 				t.Fatalf("unexpected rejection: %v", err)
 			}
@@ -188,12 +189,12 @@ func TestAdvanceInvestigationRejectsStaleAndTamperedAuthority(t *testing.T) {
 			}
 		})
 	}
-	receipt, err := s.advanceInvestigation(context.Background(), valid)
+	receipt, err := s.advanceInvestigation(testContext(t), valid)
 	if err != nil {
 		t.Fatalf("valid attempt failed after rejected forgeries: %v", err)
 	}
 	checkAdvanced(t, s, r, receipt)
-	if _, err = s.advanceInvestigation(context.Background(), valid); !errors.Is(err, ErrTransitionRejected) {
+	if _, err = s.advanceInvestigation(testContext(t), valid); !errors.Is(err, ErrTransitionRejected) {
 		t.Fatalf("old replay should be fenced: %v", err)
 	}
 	checkAdvanced(t, s, r, receipt)
@@ -202,12 +203,12 @@ func TestAdvanceInvestigationRejectsStaleAndTamperedAuthority(t *testing.T) {
 func TestAdvanceInvestigationExpiredLeaseFailsClosed(t *testing.T) {
 	s := storeForTest(t)
 	c, r := admitForTest(t, s, "advance-expired")
-	old, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-old-worker", 1)
+	old, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-old-worker", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(1300 * time.Millisecond)
-	_, err = s.advanceInvestigation(context.Background(), validAdvance(t, c, old))
+	waitForLeaseExpiry(t, s, r.TaskID)
+	_, err = s.advanceInvestigation(testContext(t), validAdvance(t, c, old))
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("expired result accepted or unknown error: %v", err)
 	}
@@ -215,24 +216,42 @@ func TestAdvanceInvestigationExpiredLeaseFailsClosed(t *testing.T) {
 	if before.state != "INVESTIGATING" || before.version != 1 || before.used != 0 || before.tasks != 1 || before.outbox != 1 {
 		t.Fatalf("expired result changed state: %+v", before)
 	}
-	replacement, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-new-worker", 30)
+	replacement, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-new-worker", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if replacement.LeaseEpoch != old.LeaseEpoch+1 || replacement.AttemptID != old.AttemptID {
 		t.Fatalf("reclaim created new semantic attempt: %+v %+v", old, replacement)
 	}
-	receipt, err := s.advanceInvestigation(context.Background(), validAdvance(t, c, replacement))
+	afterReclaim := snapshotFor(t, s, r)
+	if _, err = s.Heartbeat(testContext(t), old, 30); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("RF-05: stale heartbeat accepted after actual reclaim: %v", err)
+	}
+	if _, err = s.advanceInvestigation(testContext(t), validAdvance(t, c, old)); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("RF-05: stale result accepted after actual reclaim: %v", err)
+	}
+	if after := snapshotFor(t, s, r); after != afterReclaim {
+		t.Fatalf("RF-05: rejected old owner changed persisted state: before=%+v after=%+v", afterReclaim, after)
+	}
+	receipt, err := s.advanceInvestigation(testContext(t), validAdvance(t, c, replacement))
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkAdvanced(t, s, r, receipt)
+	accepted := snapshotFor(t, s, r)
+	if _, err = s.advanceInvestigation(testContext(t), validAdvance(t, c, replacement)); !errors.Is(err, ErrTransitionRejected) {
+		t.Fatal("RF-05: duplicate valid result was not fenced")
+	}
+	if after := snapshotFor(t, s, r); after != accepted {
+		t.Fatal("RF-05: duplicate result created another durable outcome")
+	}
+	t.Logf("RF-05 observed after expiry/reclaim: epoch=%d deliveries=%d semantic_attempt=%d budget=%d version=%d tasks=%d transitions=%d outbox=%d; stale submissions unchanged", accepted.firstTaskEpoch, accepted.firstTaskDeliveries, accepted.firstAttemptNo, accepted.used, accepted.version, accepted.tasks, accepted.transitions, accepted.outbox)
 }
 
 func TestAdvanceInvestigationCompetingWorkersSingleTransition(t *testing.T) {
 	s := storeForTest(t)
 	c, r := admitForTest(t, s, "advance-concurrent")
-	lease, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-worker", 30)
+	lease, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-worker", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +269,7 @@ func TestAdvanceInvestigationCompetingWorkersSingleTransition(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-begin
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
 			result, err := s.advanceInvestigation(ctx, cmd)
 			ch <- reply{result, err}
@@ -278,7 +297,7 @@ func TestAdvanceInvestigationCompetingWorkersSingleTransition(t *testing.T) {
 func TestAdvanceInvestigationRollsBackOnLateConstraintFailure(t *testing.T) {
 	s := storeForTest(t)
 	c, r := admitForTest(t, s, "advance-rollback")
-	lease, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-worker", 30)
+	lease, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-worker", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,13 +309,13 @@ func TestAdvanceInvestigationRollsBackOnLateConstraintFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.db.Exec(`INSERT INTO orchestration.stage_attempts(attempt_id,run_id,stage,semantic_attempt_no)
+	_, err = s.db.ExecContext(testContext(t), `INSERT INTO orchestration.stage_attempts(attempt_id,run_id,stage,semantic_attempt_no)
         VALUES($1::uuid,$2::uuid,'PLANNING',1)`, poisonID, r.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := snapshotFor(t, s, r)
-	_, err = s.advanceInvestigation(context.Background(), validAdvance(t, c, lease))
+	_, err = s.advanceInvestigation(testContext(t), validAdvance(t, c, lease))
 	if err == nil {
 		t.Fatal("constraint failure did not abort the transition")
 	}
@@ -309,15 +328,15 @@ func TestAdvanceInvestigationRollsBackOnLateConstraintFailure(t *testing.T) {
 func TestAdvanceInvestigationPersistsAcrossNewConnection(t *testing.T) {
 	s := storeForTest(t)
 	c, r := admitForTest(t, s, "advance-reconnect")
-	lease, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-worker", 30)
+	lease, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-worker", 30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := s.advanceInvestigation(context.Background(), validAdvance(t, c, lease))
+	receipt, err := s.advanceInvestigation(testContext(t), validAdvance(t, c, lease))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	reconnect, err := Open(ctx, os.Getenv("ASEP_ORCHESTRATOR_DATABASE_URL"))
 	if err != nil {

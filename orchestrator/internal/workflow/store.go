@@ -389,8 +389,39 @@ func (s *Store) Heartbeat(ctx context.Context, lease TaskLease, leaseSeconds int
 	if leaseSeconds < 1 || leaseSeconds > 300 {
 		return time.Time{}, errors.New("invalid lease duration")
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer tx.Rollback()
+	// Use the same run -> task order as claims and transitions. A shared run
+	// lock prevents its active stage from changing while this lease is renewed.
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM orchestration.workflow_runs
+        WHERE run_id=$1::uuid FOR SHARE`, lease.RunID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("lock workflow for heartbeat: %w", err)
+	}
+	if state != lease.Stage {
+		return time.Time{}, ErrLeaseLost
+	}
+	// Lock by stable identity only. An expiry predicate evaluated before a lock
+	// wait could remain true for an unchanged tuple after the lease has expired.
+	var taskID string
+	err = tx.QueryRowContext(ctx, `SELECT task_id::text FROM orchestration.task_deliveries
+        WHERE task_id=$1::uuid AND run_id=$2::uuid FOR UPDATE`, lease.TaskID, lease.RunID).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("lock task for heartbeat: %w", err)
+	}
 	var expires time.Time
-	err := s.db.QueryRowContext(ctx, `
+	// This fresh statement evaluates DB time only after both locks are held.
+	err = tx.QueryRowContext(ctx, `
         UPDATE orchestration.task_deliveries t
         SET lease_expires_at=clock_timestamp()+($5::int*interval '1 second'),
             updated_at=clock_timestamp()
@@ -407,6 +438,9 @@ func (s *Store) Heartbeat(ctx context.Context, lease TaskLease, leaseSeconds int
 	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("heartbeat task: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return time.Time{}, fmt.Errorf("commit heartbeat: %w", err)
 	}
 	return expires, nil
 }

@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -161,7 +161,7 @@ GRANT SELECT, INSERT ON public.guard_mutation_probe TO asep_orch_runtime;
 GRANT USAGE ON SEQUENCE public.guard_mutation_probe_id_seq TO asep_orch_runtime;
 SQL
 
-phase='Flyway V1-V4'
+phase='Flyway V1-V5'
 printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_orch_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=orchestration\nFLYWAY_DEFAULT_SCHEMA=orchestration\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
   "$port" "$database" "$migrator_password" > "$private_dir/flyway.env"
 docker_cmd create --cidfile "$private_dir/flyway.cid" \
@@ -176,10 +176,13 @@ run_bounded 120 docker wait "$flyway_id" > "$private_dir/flyway-exit"
 phase='migration and least-privilege assertions'
 history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
   "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
-[[ "$history" == '1,2,3,4' ]] || fail
+[[ "$history" == '1,2,3,4,5' ]] || fail
 rights="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
   "SELECT has_table_privilege('asep_orch_runtime','orchestration.workflow_runs','INSERT'),has_schema_privilege('asep_orch_runtime','orchestration','CREATE'),has_table_privilege('asep_orch_runtime','orchestration.flyway_schema_history','UPDATE'),has_table_privilege('asep_orch_runtime','orchestration.workflow_transitions','SELECT'),has_table_privilege('asep_orch_runtime','orchestration.workflow_transitions','INSERT'),has_table_privilege('asep_orch_runtime','orchestration.workflow_transitions','UPDATE'),has_table_privilege('asep_orch_runtime','orchestration.workflow_transitions','DELETE')")"
 [[ "$rights" == 't|f|f|t|t|f|f' ]] || fail
+receipt_rights="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','SELECT'),has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','INSERT'),has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','UPDATE'),has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','DELETE'),has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','TRUNCATE'),has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','REFERENCES'),has_table_privilege('asep_orch_runtime','orchestration.workflow_result_receipts','TRIGGER')")"
+[[ "$receipt_rights" == 't|t|f|f|f|f|f' ]] || fail
 index_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
   "SELECT count(*) FROM pg_indexes WHERE schemaname='orchestration' AND indexname='uq_orch_one_active_canonical_subject'")"
 [[ "$index_count" == 1 ]] || fail
@@ -241,12 +244,28 @@ for expected in \
   TestHeartbeatRejectsLeaseExpiredWhileWaitingForRowLock \
   TestHeartbeatTransitionLockOrdering \
   TestHeartbeatConcurrentClaim \
-  TestHeartbeatDatabaseErrorsRemainDistinctFromLeaseLoss; do
+  TestHeartbeatDatabaseErrorsRemainDistinctFromLeaseLoss \
+  TestResultLockedAcceptance \
+  TestResultReplayAndLostApplicationACK \
+  TestResultConcurrentSubmissions \
+  TestResultOperationIdentityAcrossRuns \
+  TestResultCommitResponseLoss \
+  TestResultReconciliationDeadline \
+  TestResultReceiptConstraintsAndPermissions \
+  TestResultCanonicalPayload \
+  TestResultIdentityValidation; do
   python3 - "$private_dir/discovery" "$expected" <<'PY'
 import sys
 assert sys.argv[2] in open(sys.argv[1]).read().splitlines(), 'required test missing'
 PY
 done
+if [[ "$mode" == b2 ]]; then
+  phase='B2 locked acceptance, result replay and commit uncertainty'
+  run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
+    -run '^Test(Result|AdvanceInvestigation|Heartbeat)' ./internal/workflow
+  echo 'B2 focused verification PASS: locked acceptance, receipts, replay and commit uncertainty'
+  exit 0
+fi
 if [[ "$mode" == heartbeat ]]; then
   phase='focused heartbeat, claim and transition regressions'
   run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
@@ -259,4 +278,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, unchanged V1-V4, existing regressions'
+echo 'VN-T11 disposable verification PASS: proof guard, V1-V5, B0/B1/B2 regressions'

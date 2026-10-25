@@ -19,7 +19,10 @@ import (
 // Store is trusted Go orchestration state, NOT an untrusted agent interface.
 // Admission inputs are assumed to have passed Java authorization/policy checks.
 // The cross-service authentication/gate adapter remains a later ticket.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db          *sql.DB
+	databaseURL string // Retained privately for independent, bounded receipt reconciliation.
+}
 
 var (
 	ErrConflict  = errors.New("workflow admission conflict")
@@ -42,7 +45,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("connect orchestration database: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, databaseURL: databaseURL}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

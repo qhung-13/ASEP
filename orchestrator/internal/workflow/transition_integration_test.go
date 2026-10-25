@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func validAdvance(t *testing.T, c Admission, l TaskLease) investigationAdvance {
@@ -22,24 +24,28 @@ func validAdvance(t *testing.T, c Admission, l TaskLease) investigationAdvance {
 	if !strings.HasPrefix(prefix, "synthetic:vn-t10-it-") {
 		t.Fatal("unsafe fixture prefix")
 	}
+	operationID, err := freshUUID()
+	if err != nil {
+		t.Fatal("operation identity unavailable")
+	}
 	return investigationAdvance{
-		Lease: l, ExpectedRunVersion: 1, ExpectedPolicyEpoch: c.PolicyEpoch,
+		OperationID: operationID, Lease: l, ExpectedRunVersion: 1, ExpectedPolicyEpoch: c.PolicyEpoch,
 		ExpectedSourceFingerprintSHA256: c.SourceFingerprintSHA256,
 		EvidenceRef:                     prefix + ":trusted-investigation-fixture", BudgetDebit: 0,
 	}
 }
 
 type transitionSnapshot struct {
-	state                                              string
-	version                                            int64
-	used, limit                                        int
-	tasks, attempts, transitions, outbox, outstanding  int
-	firstTaskStatus, firstTaskClaimant, firstTaskStage string
-	firstTaskEpoch                                     int64
-	firstTaskDeliveries                                int
-	firstTaskExpiry                                    sql.NullTime
-	firstAttemptState                                  string
-	firstAttemptNo                                     int
+	state                                                       string
+	version                                                     int64
+	used, limit                                                 int
+	tasks, attempts, transitions, outbox, outstanding, receipts int
+	firstTaskStatus, firstTaskClaimant, firstTaskStage          string
+	firstTaskEpoch                                              int64
+	firstTaskDeliveries                                         int
+	firstTaskExpiry                                             sql.NullTime
+	firstAttemptState                                           string
+	firstAttemptNo                                              int
 }
 
 func snapshotFor(t *testing.T, s *Store, r AdmissionReceipt) transitionSnapshot {
@@ -54,13 +60,14 @@ func snapshotFor(t *testing.T, s *Store, r AdmissionReceipt) transitionSnapshot 
           (SELECT count(*) FROM orchestration.workflow_transitions WHERE run_id=r.run_id),
           (SELECT count(*) FROM orchestration.workflow_outbox WHERE run_id=r.run_id),
           (SELECT count(*) FROM orchestration.task_deliveries WHERE run_id=r.run_id AND status IN ('QUEUED','LEASED')),
+          (SELECT count(*) FROM orchestration.workflow_result_receipts WHERE run_id=r.run_id),
           t.status,coalesce(t.claimant_id,''),t.stage,t.lease_epoch,t.delivery_count,t.lease_expires_at,
           a.state,a.semantic_attempt_no
         FROM orchestration.workflow_runs r
         JOIN orchestration.task_deliveries t ON t.run_id=r.run_id AND t.task_id=$2::uuid
         JOIN orchestration.stage_attempts a ON a.run_id=r.run_id AND a.attempt_id=$3::uuid
         WHERE r.run_id=$1::uuid`, r.RunID, r.TaskID, r.AttemptID).Scan(
-		&z.state, &z.version, &z.used, &z.limit, &z.tasks, &z.attempts, &z.transitions, &z.outbox, &z.outstanding,
+		&z.state, &z.version, &z.used, &z.limit, &z.tasks, &z.attempts, &z.transitions, &z.outbox, &z.outstanding, &z.receipts,
 		&z.firstTaskStatus, &z.firstTaskClaimant, &z.firstTaskStage, &z.firstTaskEpoch, &z.firstTaskDeliveries,
 		&z.firstTaskExpiry, &z.firstAttemptState, &z.firstAttemptNo)
 	if err != nil {
@@ -75,11 +82,16 @@ func checkAdvanced(t *testing.T, s *Store, r AdmissionReceipt, receipt advanceRe
 	if z.state != "PLANNING" || z.version != 2 || z.used != 0 ||
 		z.tasks != 2 || z.attempts != 2 || z.transitions != 2 || z.outbox != 2 ||
 		z.firstTaskStatus != "COMPLETED" || z.firstAttemptState != "SUCCEEDED" ||
-		z.firstAttemptNo != 1 || z.outstanding != 1 || z.firstTaskEpoch < 1 || z.firstTaskClaimant == "" {
+		z.firstAttemptNo != 1 || z.outstanding != 1 || z.receipts != 1 || z.firstTaskEpoch < 1 || z.firstTaskClaimant == "" {
 		t.Fatalf("invalid atomic successor snapshot: %+v", z)
 	}
+	durable, err := queryResult(testContext(t), s.db, receipt.OperationID, receipt.PayloadSHA256)
+	if err != nil || durable != receipt || receipt.PreviousTaskID != r.TaskID || receipt.PreviousAttemptID != r.AttemptID ||
+		receipt.AcceptedAt.IsZero() || !receipt.AcceptedAt.Before(z.firstTaskExpiry.Time) {
+		t.Fatal("durable result receipt differs from accepted bundle or acceptance time")
+	}
 	var nextStatus, nextAttemptState string
-	err := s.db.QueryRowContext(testContext(t), `SELECT status FROM orchestration.task_deliveries WHERE task_id=$1::uuid`, receipt.NextTaskID).Scan(&nextStatus)
+	err = s.db.QueryRowContext(testContext(t), `SELECT status FROM orchestration.task_deliveries WHERE task_id=$1::uuid`, receipt.NextTaskID).Scan(&nextStatus)
 	if err != nil || nextStatus != "QUEUED" {
 		t.Fatalf("next task: status=%s err=%v", nextStatus, err)
 	}
@@ -194,8 +206,8 @@ func TestAdvanceInvestigationRejectsStaleAndTamperedAuthority(t *testing.T) {
 		t.Fatalf("valid attempt failed after rejected forgeries: %v", err)
 	}
 	checkAdvanced(t, s, r, receipt)
-	if _, err = s.advanceInvestigation(testContext(t), valid); !errors.Is(err, ErrTransitionRejected) {
-		t.Fatalf("old replay should be fenced: %v", err)
+	if replay, err := s.advanceInvestigation(testContext(t), valid); err != nil || replay != receipt {
+		t.Fatal("exact replay did not return the original durable receipt")
 	}
 	checkAdvanced(t, s, r, receipt)
 }
@@ -265,13 +277,20 @@ func TestAdvanceInvestigationCompetingWorkersSingleTransition(t *testing.T) {
 	begin := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
+		// Distinct logical operations compete for one completion. Matching
+		// operation replay is covered separately by the B2 result tests.
+		request := cmd
+		request.OperationID, err = freshUUID()
+		if err != nil {
+			t.Fatal("competing operation identity unavailable")
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-begin
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
-			result, err := s.advanceInvestigation(ctx, cmd)
+			result, err := s.advanceInvestigation(ctx, request)
 			ch <- reply{result, err}
 		}()
 	}
@@ -316,8 +335,9 @@ func TestAdvanceInvestigationRollsBackOnLateConstraintFailure(t *testing.T) {
 	}
 	before := snapshotFor(t, s, r)
 	_, err = s.advanceInvestigation(testContext(t), validAdvance(t, c, lease))
-	if err == nil {
-		t.Fatal("constraint failure did not abort the transition")
+	var pgerr *pgconn.PgError
+	if !errors.As(err, &pgerr) || pgerr.Code != "23505" || errors.Is(err, ErrResultConflict) || errors.Is(err, ErrResultUnknown) {
+		t.Fatal("unrelated late constraint failure lost its database error classification")
 	}
 	after := snapshotFor(t, s, r)
 	if before != after {

@@ -9,6 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var ErrTransitionRejected = errors.New("workflow transition not authorized by current durable state")
@@ -19,6 +23,7 @@ var ErrTransitionRejected = errors.New("workflow transition not authorized by cu
 // caller identity, policy, evidence provenance and permitted state transitions
 // before invoking any corresponding production method.
 type investigationAdvance struct {
+	OperationID                     string // Generated once by the trusted caller, reused on retry.
 	Lease                           TaskLease
 	ExpectedRunVersion              int64
 	ExpectedPolicyEpoch             int64
@@ -28,18 +33,30 @@ type investigationAdvance struct {
 }
 
 type advanceReceipt struct {
-	RunID           string
-	PreviousTaskID  string
-	NextAttemptID   string
-	NextTaskID      string
-	TransitionID    string
-	OutboxMessageID string
-	RunVersion      int64
+	OperationID             string
+	DigestVersion           int
+	PayloadSHA256           string
+	RunID                   string
+	PreviousTaskID          string
+	PreviousAttemptID       string
+	ClaimantID              string
+	LeaseEpoch              int64
+	ExpectedRunVersion      int64
+	PolicyEpoch             int64
+	SourceFingerprintSHA256 string
+	NextAttemptID           string
+	NextTaskID              string
+	TransitionID            string
+	OutboxMessageID         string
+	RunVersion              int64
+	AcceptedAt              time.Time
 }
 
 func (c investigationAdvance) validate() error {
-	if strings.TrimSpace(c.Lease.RunID) == "" || strings.TrimSpace(c.Lease.TaskID) == "" ||
-		strings.TrimSpace(c.Lease.AttemptID) == "" || strings.TrimSpace(c.Lease.ClaimantID) == "" ||
+	if !canonicalUUID(c.OperationID) || !canonicalUUID(c.Lease.RunID) ||
+		!canonicalUUID(c.Lease.TaskID) || !canonicalUUID(c.Lease.AttemptID) ||
+		strings.TrimSpace(c.Lease.ClaimantID) == "" || len(c.Lease.ClaimantID) > 128 ||
+		!utf8.ValidString(c.Lease.ClaimantID) || !utf8.ValidString(c.EvidenceRef) ||
 		c.Lease.Stage != "INVESTIGATING" || c.Lease.LeaseEpoch < 1 ||
 		c.ExpectedRunVersion < 1 || c.ExpectedPolicyEpoch < 1 ||
 		!isLowerHex(c.ExpectedSourceFingerprintSHA256, 64) ||
@@ -56,10 +73,16 @@ func (c investigationAdvance) validate() error {
 // advanceInvestigation completes one valid LEASED INVESTIGATING task and makes
 // PLANNING available with an outbox event in ONE PostgreSQL transaction.
 // No long-running work or external calls happen while locks are held.
-// Lease expiry is evaluated with DB clock_timestamp() at task UPDATE, not only
-// in the earlier application-side read; stale owners never commit a transition.
+// After run -> task locks, a fresh statement captures one DB timestamp and
+// conditionally completes the task. This is the locked acceptance point, not a
+// promise that COMMIT occurs before expiry. Locks serialize reclaim/heartbeat
+// until commit. Exact receipt replay does not confer new execution authority.
 func (s *Store) advanceInvestigation(ctx context.Context, c investigationAdvance) (advanceReceipt, error) {
 	if err := c.validate(); err != nil {
+		return advanceReceipt{}, err
+	}
+	canonicalDigest, err := c.canonicalPayloadSHA256()
+	if err != nil {
 		return advanceReceipt{}, err
 	}
 
@@ -110,41 +133,57 @@ func (s *Store) advanceInvestigation(ctx context.Context, c investigationAdvance
         FROM orchestration.workflow_runs
         WHERE run_id=$1::uuid FOR UPDATE`, c.Lease.RunID).Scan(
 		&state, &runVersion, &policyEpoch, &sourceFingerprint)
-	if errors.Is(err, sql.ErrNoRows) {
-		return advanceReceipt{}, ErrTransitionRejected
-	}
-	if err != nil {
+	runMissing := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !runMissing {
 		return advanceReceipt{}, fmt.Errorf("lock run: %w", err)
 	}
-	if state != "INVESTIGATING" || runVersion != c.ExpectedRunVersion ||
+	// Resolve historical identity before active-stage/lease validation. This is
+	// a read-only replay, including after lease expiry or later run progress.
+	prior, err := queryResult(ctx, tx, c.OperationID, canonicalDigest)
+	if err == nil {
+		return prior, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return advanceReceipt{}, err
+	}
+	if runMissing || state != "INVESTIGATING" || runVersion != c.ExpectedRunVersion ||
 		policyEpoch != c.ExpectedPolicyEpoch ||
 		sourceFingerprint != c.ExpectedSourceFingerprintSHA256 {
 		return advanceReceipt{}, ErrTransitionRejected
 	}
 
-	// Must still own the *current, unexpired* task lease. There is no
-	// acceptance grace period after expiration, even without a reclaim.
-	changed, err := tx.ExecContext(ctx, `
-        UPDATE orchestration.task_deliveries
+	// Lock without an expiry predicate: waiting must not preserve a previously
+	// true time check on an unchanged tuple (the F01/F08 failure condition).
+	var lockedTask string
+	err = tx.QueryRowContext(ctx, `SELECT task_id::text FROM orchestration.task_deliveries
+        WHERE task_id=$1::uuid AND run_id=$2::uuid FOR UPDATE`, c.Lease.TaskID, c.Lease.RunID).Scan(&lockedTask)
+	if errors.Is(err, sql.ErrNoRows) {
+		return advanceReceipt{}, ErrLeaseLost
+	}
+	if err != nil {
+		return advanceReceipt{}, fmt.Errorf("lock result task: %w", err)
+	}
+	var acceptedAt time.Time
+	err = tx.QueryRowContext(ctx, `
+        WITH acceptance AS MATERIALIZED (SELECT clock_timestamp() AS at)
+        UPDATE orchestration.task_deliveries t
         SET status='COMPLETED',updated_at=clock_timestamp()
-        WHERE task_id=$1::uuid AND run_id=$2::uuid AND attempt_id=$3::uuid
-          AND stage='INVESTIGATING' AND status='LEASED'
-          AND claimant_id=$4 AND lease_epoch=$5
-          AND lease_expires_at>clock_timestamp()`,
+        FROM acceptance
+        WHERE t.task_id=$1::uuid AND t.run_id=$2::uuid AND t.attempt_id=$3::uuid
+          AND t.stage='INVESTIGATING' AND t.status='LEASED'
+          AND t.claimant_id=$4 AND t.lease_epoch=$5
+          AND t.lease_expires_at>acceptance.at
+        RETURNING acceptance.at`,
 		c.Lease.TaskID, c.Lease.RunID, c.Lease.AttemptID,
-		c.Lease.ClaimantID, c.Lease.LeaseEpoch)
+		c.Lease.ClaimantID, c.Lease.LeaseEpoch).Scan(&acceptedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return advanceReceipt{}, ErrLeaseLost
+	}
 	if err != nil {
 		return advanceReceipt{}, fmt.Errorf("complete task: %w", err)
 	}
-	n, err := changed.RowsAffected()
-	if err != nil {
-		return advanceReceipt{}, err
-	}
-	if n != 1 {
-		return advanceReceipt{}, ErrLeaseLost
-	}
 
-	changed, err = tx.ExecContext(ctx, `
+	changed, err := tx.ExecContext(ctx, `
         UPDATE orchestration.stage_attempts
         SET state='SUCCEEDED',completed_at=clock_timestamp()
         WHERE attempt_id=$1::uuid AND run_id=$2::uuid
@@ -153,7 +192,7 @@ func (s *Store) advanceInvestigation(ctx context.Context, c investigationAdvance
 	if err != nil {
 		return advanceReceipt{}, fmt.Errorf("complete attempt: %w", err)
 	}
-	n, err = changed.RowsAffected()
+	n, err := changed.RowsAffected()
 	if err != nil {
 		return advanceReceipt{}, err
 	}
@@ -215,32 +254,40 @@ func (s *Store) advanceInvestigation(ctx context.Context, c investigationAdvance
 		return advanceReceipt{}, fmt.Errorf("insert outbox: %w", err)
 	}
 
-	// Recheck DB lease time directly before transaction commit. Retain the
-	// previous owner/expiry as audit metadata on the COMPLETED task; heartbeat
-	// still rejects non-LEASED status. This narrows, but does not eliminate,
-	// the tiny PostgreSQL check-to-commit timing window (VN-T11 fault gate).
-	var validAtBoundary bool
-	err = tx.QueryRowContext(ctx, `
-        SELECT lease_expires_at > clock_timestamp()
-        FROM orchestration.task_deliveries
-        WHERE task_id=$1::uuid AND run_id=$2::uuid AND attempt_id=$3::uuid
-          AND status='COMPLETED' AND claimant_id=$4 AND lease_epoch=$5`,
-		c.Lease.TaskID, c.Lease.RunID, c.Lease.AttemptID,
-		c.Lease.ClaimantID, c.Lease.LeaseEpoch).Scan(&validAtBoundary)
-	if errors.Is(err, sql.ErrNoRows) {
-		return advanceReceipt{}, ErrLeaseLost
-	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO orchestration.workflow_result_receipts(
+        operation_id,digest_version,payload_sha256,run_id,task_id,attempt_id,claimant_id,
+        lease_epoch,expected_run_version,policy_epoch,source_fingerprint_sha256,
+        transition_id,next_task_id,next_attempt_id,outbox_message_id,accepted_run_version,accepted_at)
+        VALUES($1::uuid,1,$2,$3::uuid,$4::uuid,$5::uuid,$6,$7,$8,$9,$10,
+               $11::uuid,$12::uuid,$13::uuid,$14::uuid,$15,$16)`,
+		c.OperationID, canonicalDigest, c.Lease.RunID, c.Lease.TaskID, c.Lease.AttemptID,
+		c.Lease.ClaimantID, c.Lease.LeaseEpoch, c.ExpectedRunVersion, c.ExpectedPolicyEpoch,
+		c.ExpectedSourceFingerprintSHA256, transitionID, taskID, attemptID, messageID, nextVersion, acceptedAt)
 	if err != nil {
-		return advanceReceipt{}, fmt.Errorf("revalidate lease before commit: %w", err)
-	}
-	if !validAtBoundary {
-		return advanceReceipt{}, ErrLeaseLost
+		// Only the operation PK can represent a cross-run operation race. Other
+		// SQL failures retain their real classification and roll back the bundle.
+		var pgerr *pgconn.PgError
+		if errors.As(err, &pgerr) && pgerr.Code == "23505" && pgerr.ConstraintName == "workflow_result_receipts_pkey" {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				return advanceReceipt{}, rollbackErr
+			}
+			return s.reconcileInvestigation(ctx, c)
+		}
+		return advanceReceipt{}, fmt.Errorf("insert result receipt: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
-		return advanceReceipt{}, fmt.Errorf("commit transition: %w", err)
+		recovered, lookupErr := s.reconcileInvestigation(ctx, c)
+		if lookupErr == nil || errors.Is(lookupErr, ErrResultConflict) {
+			return recovered, lookupErr
+		}
+		return advanceReceipt{}, &resultUnknownError{err}
 	}
-	return advanceReceipt{RunID: c.Lease.RunID, PreviousTaskID: c.Lease.TaskID,
+	return advanceReceipt{OperationID: c.OperationID, DigestVersion: 1, PayloadSHA256: canonicalDigest,
+		RunID: c.Lease.RunID, PreviousTaskID: c.Lease.TaskID, PreviousAttemptID: c.Lease.AttemptID,
+		ClaimantID: c.Lease.ClaimantID, LeaseEpoch: c.Lease.LeaseEpoch,
+		ExpectedRunVersion: c.ExpectedRunVersion, PolicyEpoch: c.ExpectedPolicyEpoch,
+		SourceFingerprintSHA256: c.ExpectedSourceFingerprintSHA256, AcceptedAt: acceptedAt,
 		NextAttemptID: attemptID, NextTaskID: taskID, TransitionID: transitionID,
 		OutboxMessageID: messageID, RunVersion: nextVersion}, nil
 }

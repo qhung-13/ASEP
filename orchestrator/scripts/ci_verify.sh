@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -45,7 +45,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway postgres; do
+  for resource in flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -167,7 +167,7 @@ printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_orch_migr
 docker_cmd create --cidfile "$private_dir/flyway.cid" \
   --name "asep-vnt11-flyway-$run_id" --label "$owner_label=$run_id" \
   --network host --env-file "$private_dir/flyway.env" \
-  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 migrate >"$private_dir/flyway-create.log" 2>&1
+  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 -target=5 migrate >"$private_dir/flyway-create.log" 2>&1
 flyway_id="$(cat "$private_dir/flyway.cid")"
 docker_cmd start "$flyway_id" >/dev/null
 run_bounded 120 docker wait "$flyway_id" > "$private_dir/flyway-exit"
@@ -225,6 +225,44 @@ echo 'B0 safety gate PASS: read-only proof verified; unsafe targets rejected; mu
 if [[ "$mode" == proof-only ]]; then exit 0; fi
 if [[ "$mode" == cleanup-failure ]]; then phase='intentional controlled cleanup check'; fail; fi
 
+phase='populated V5 compatibility baseline'
+run_bounded 90 go test -race -count=1 -tags=integration -timeout=60s -v \
+  -run '^TestResultReplayAndLostApplicationACK$' ./internal/workflow
+receipt_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  'SELECT count(*) FROM orchestration.workflow_result_receipts')"
+[[ "$receipt_count" == 1 ]] || fail
+# Compare every legacy row/field, excluding only V6's newly added NULL columns.
+# This SQL and its digest stay private; fixture content/credentials are not logged.
+cat > "$private_dir/legacy-snapshot.sql" <<'SQL'
+SELECT md5(jsonb_build_array(
+  (SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM orchestration.workflow_runs r),
+  (SELECT jsonb_agg(to_jsonb(a) ORDER BY attempt_id) FROM orchestration.stage_attempts a),
+  (SELECT jsonb_agg(to_jsonb(t) ORDER BY task_id) FROM orchestration.task_deliveries t),
+  (SELECT jsonb_agg(to_jsonb(t) - ARRAY['control_operation_id','control_kind','control_digest_version',
+    'control_payload_sha256','control_task_id','control_claimant_id','control_lease_epoch',
+    'control_policy_epoch','control_source_fingerprint_sha256'] ORDER BY transition_id)
+    FROM orchestration.workflow_transitions t),
+  (SELECT jsonb_agg(to_jsonb(o) ORDER BY message_id) FROM orchestration.workflow_outbox o),
+  (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM orchestration.workflow_result_receipts r)
+)::text);
+SQL
+legacy_before="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/legacy-snapshot.sql")"
+phase='Flyway V6 populated upgrade'
+docker_cmd create --cidfile "$private_dir/flyway_v6.cid" \
+  --name "asep-vnt11-flyway-v6-$run_id" --label "$owner_label=$run_id" \
+  --network host --env-file "$private_dir/flyway.env" \
+  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 -target=6 migrate >"$private_dir/flyway-v6-create.log" 2>&1
+flyway_v6_id="$(cat "$private_dir/flyway_v6.cid")"
+docker_cmd start "$flyway_v6_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v6_id" > "$private_dir/flyway-v6-exit"
+[[ "$(cat "$private_dir/flyway-v6-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6' ]] || fail
+legacy_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/legacy-snapshot.sql")"
+[[ "$legacy_before" == "$legacy_after" ]] || fail
+echo 'RF-07A populated V5 -> V6 compatibility PASS: all legacy rows/fields/receipts preserved'
+
 phase='Go vet and unit regressions'
 run_bounded 120 go vet -tags=integration ./...
 run_bounded 120 go test -race -count=1 -timeout=90s ./...
@@ -254,12 +292,33 @@ for expected in \
   TestResultReconciliationDeadline \
   TestResultReceiptConstraintsAndPermissions \
   TestResultCanonicalPayload \
-  TestResultIdentityValidation; do
+  TestResultIdentityValidation \
+  TestCancellationCanonicalPayload \
+  TestCancellationIdentityValidation \
+  TestCancellationCompletionRace \
+  TestCancellationReplayAndFencing \
+  TestCancellationHistoricalCompletionReplay \
+  TestCancellationRejectsStaleBindings \
+  TestCancellationConcurrentOperationIdentity \
+  TestCancellationRollbackOnAuditFailure \
+  TestCancellationCommitResponseLoss \
+  TestCancellationReconciliationDeadline \
+  TestCancellationAuditConstraintsAndPermissions; do
   python3 - "$private_dir/discovery" "$expected" <<'PY'
 import sys
 assert sys.argv[2] in open(sys.argv[1]).read().splitlines(), 'required test missing'
 PY
 done
+if [[ "$mode" == rf07a ]]; then
+  phase='RF-07A durable cancellation request regressions'
+  run_bounded 120 go test -race -count=1 -tags=integration -timeout=90s -v \
+    -run '^TestCancellation' ./internal/workflow
+  phase='RF-07A repeated cancellation/completion and control-identity races'
+  run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
+    -run '^TestCancellation(CompletionRace|ConcurrentOperationIdentity)$' ./internal/workflow
+  echo 'RF-07A focused verification PASS: durable stop intent, replay, fencing, COMMIT faults and repeated races'
+  exit 0
+fi
 if [[ "$mode" == rf06-process ]]; then
   phase='RF-06 repeated process crash after result COMMIT before application ACK'
   run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
@@ -286,4 +345,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, V1-V5, B0/B1/B2 regressions'
+echo 'VN-T11 disposable verification PASS: proof guard, V1-V6, B0/B1/B2/RF-06/RF-07A regressions'

@@ -10,19 +10,20 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/qhung-13/ASEP/orchestrator/internal/testsupport"
 )
+
+func testContext(t *testing.T) context.Context { return testsupport.Context(t) }
 
 func storeForTest(t *testing.T) *Store {
 	t.Helper()
-	url := os.Getenv("ASEP_ORCHESTRATOR_DATABASE_URL")
-	if url == "" {
-		t.Fatal("integration database URL missing")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	url := testsupport.DatabaseURL(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	s, err := Open(ctx, url)
 	if err != nil {
-		t.Fatalf("open test store: %v", err)
+		t.Fatal("verified disposable test store unavailable")
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
@@ -57,7 +58,7 @@ func admissionForTest(t *testing.T, extra string) Admission {
 func admitForTest(t *testing.T, s *Store, extra string) (Admission, AdmissionReceipt) {
 	t.Helper()
 	c := admissionForTest(t, extra)
-	r, err := s.Admit(context.Background(), c)
+	r, err := s.Admit(testContext(t), c)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -66,7 +67,7 @@ func admitForTest(t *testing.T, s *Store, extra string) (Admission, AdmissionRec
 
 func TestAdmissionReplayConflictAtomicBundle(t *testing.T) {
 	s := storeForTest(t)
-	ctx := context.Background()
+	ctx := testContext(t)
 	cmd, r := admitForTest(t, s, "admission")
 	if r.RunID == "" || r.TaskID == "" || r.AttemptID == "" || r.Replayed {
 		t.Fatalf("invalid admission receipt: %+v", r)
@@ -135,7 +136,7 @@ func TestConcurrentClaimSingleOwner(t *testing.T) {
 		go func(i int) {
 			defer group.Done()
 			<-start
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			lease, err := s.ClaimForRun(ctx, r.RunID, "synthetic-worker-"+string(rune('a'+i)), 15)
 			responses <- response{lease, err}
@@ -145,9 +146,11 @@ func TestConcurrentClaimSingleOwner(t *testing.T) {
 	group.Wait()
 	close(responses)
 	claimed := 0
+	var winner TaskLease
 	for result := range responses {
 		if result.err == nil {
 			claimed++
+			winner = result.lease
 			if result.lease.LeaseEpoch != 1 || result.lease.DeliveryCount != 1 {
 				t.Errorf("unexpected initial lease: %+v", result.lease)
 			}
@@ -158,40 +161,52 @@ func TestConcurrentClaimSingleOwner(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("expected one winner, got %d", claimed)
 	}
-	var state string
-	if err := s.db.QueryRow(`SELECT state FROM orchestration.stage_attempts WHERE attempt_id=$1::uuid`, r.AttemptID).Scan(&state); err != nil || state != "RUNNING" {
-		t.Fatalf("attempt not RUNNING: %q %v", state, err)
+	z := snapshotFor(t, s, r)
+	if z.firstTaskClaimant != winner.ClaimantID || z.firstTaskEpoch != winner.LeaseEpoch ||
+		z.firstTaskDeliveries != winner.DeliveryCount || z.firstTaskDeliveries != 1 ||
+		!z.firstTaskExpiry.Valid || !z.firstTaskExpiry.Time.Equal(winner.ExpiresAt) ||
+		z.firstTaskStatus != "LEASED" || z.firstAttemptState != "RUNNING" ||
+		z.firstAttemptNo != 1 || z.tasks != 1 || z.attempts != 1 || z.outstanding != 1 ||
+		z.transitions != 1 || z.outbox != 1 || z.state != "INVESTIGATING" || z.version != 1 || z.used != 0 ||
+		winner.TaskID != r.TaskID || winner.AttemptID != r.AttemptID {
+		t.Fatalf("RF-03: persisted authority does not match the single winner: %+v", z)
 	}
+	t.Logf("RF-03 observed: winners=%d tasks=%d epoch=%d deliveries=%d semantic_attempt=%d version=%d budget=%d; persisted claimant matches winner", claimed, z.tasks, z.firstTaskEpoch, z.firstTaskDeliveries, z.firstAttemptNo, z.version, z.used)
+
 }
 
 func TestExpiredLeaseRejectedBeforeReclaim(t *testing.T) {
 	s := storeForTest(t)
 	_, r := admitForTest(t, s, "expiry")
-	old, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-worker-old", 1)
+	old, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-worker-old", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(1350 * time.Millisecond)
-	_, err = s.Heartbeat(context.Background(), old, 10)
+	waitForLeaseExpiry(t, s, r.TaskID)
+	before := snapshotFor(t, s, r)
+	_, err = s.Heartbeat(testContext(t), old, 10)
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("expired heartbeat accepted: %v", err)
 	}
-	next, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-worker-new", 10)
+	if after := snapshotFor(t, s, r); after != before {
+		t.Fatal("expired heartbeat changed persisted state")
+	}
+	next, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-worker-new", 10)
 	if err != nil {
 		t.Fatalf("failed reclaim: %v", err)
 	}
 	if next.LeaseEpoch != old.LeaseEpoch+1 || next.DeliveryCount != 2 || next.AttemptID != old.AttemptID {
 		t.Fatalf("redelivery must not create semantic attempt: old=%+v next=%+v", old, next)
 	}
-	_, err = s.Heartbeat(context.Background(), old, 10)
+	_, err = s.Heartbeat(testContext(t), old, 10)
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("fenced worker renewed lease: %v", err)
 	}
-	if _, err = s.Heartbeat(context.Background(), next, 10); err != nil {
+	if _, err = s.Heartbeat(testContext(t), next, 10); err != nil {
 		t.Fatalf("new owner heartbeat failed: %v", err)
 	}
 	var budget int
-	if err = s.db.QueryRow(`SELECT budget_used FROM orchestration.workflow_runs WHERE run_id=$1::uuid`, r.RunID).Scan(&budget); err != nil || budget != 0 {
+	if err = s.db.QueryRowContext(testContext(t), `SELECT budget_used FROM orchestration.workflow_runs WHERE run_id=$1::uuid`, r.RunID).Scan(&budget); err != nil || budget != 0 {
 		t.Fatalf("transport retry improperly charged semantic budget: budget=%d err=%v", budget, err)
 	}
 }
@@ -199,12 +214,12 @@ func TestExpiredLeaseRejectedBeforeReclaim(t *testing.T) {
 func TestDurableReceiptLeaseAndBudgetOnReconnect(t *testing.T) {
 	s := storeForTest(t)
 	_, r := admitForTest(t, s, "reconnect")
-	lease, err := s.ClaimForRun(context.Background(), r.RunID, "synthetic-worker-reconnect", 10)
+	lease, err := s.ClaimForRun(testContext(t), r.RunID, "synthetic-worker-reconnect", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Simulate process reconnect with a second independent Go DB pool.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	again, err := Open(ctx, os.Getenv("ASEP_ORCHESTRATOR_DATABASE_URL"))
 	if err != nil {
@@ -248,7 +263,7 @@ func TestDurableReceiptLeaseAndBudgetOnReconnect(t *testing.T) {
 // even if the claimant changes subject label, policy epoch and source revision.
 func TestAdmissionCanonicalSubjectRejectsSpoofedSubjectKey(t *testing.T) {
 	s := storeForTest(t)
-	ctx := context.Background()
+	ctx := testContext(t)
 	original, first := admitForTest(t, s, "canonical-subject")
 	spoof := original
 	spoof.CommandID, _ = freshUUID()
@@ -280,7 +295,7 @@ func TestAdmissionDifferentGitLabProjectIsSeparateSubject(t *testing.T) {
 	another.CommandID, _ = freshUUID()
 	another.SubjectKey += ":another-repository"
 	another.GitLabProjectID = "synthetic-other-gitlab-project"
-	if _, err := s.Admit(context.Background(), another); err != nil {
+	if _, err := s.Admit(testContext(t), another); err != nil {
 		t.Fatalf("distinct canonical GitLab project incorrectly blocked: %v", err)
 	}
 }
@@ -295,13 +310,18 @@ func TestAdmissionRejectsSameClaimedHashChangedSource(t *testing.T) {
 	changed := original
 	changed.SourceFingerprintSHA256 = strings.Repeat("f", 64)
 	changed.PayloadSHA256 = originalHash
-	if _, err = s.Admit(context.Background(), changed); !errors.Is(err, ErrConflict) {
+	if _, err = s.Admit(testContext(t), changed); !errors.Is(err, ErrConflict) {
 		t.Fatalf("same command ID, same claimed hash, changed source accepted: %v", err)
 	}
 	replayed := original
 	replayed.PayloadSHA256 = originalHash
-	result, err := s.Admit(context.Background(), replayed)
+	result, err := s.Admit(testContext(t), replayed)
 	if err != nil || !result.Replayed || result.RunID != first.RunID {
 		t.Fatalf("correct asserted hash of identical command did not replay: %+v %v", result, err)
 	}
+}
+
+func waitForLeaseExpiry(t *testing.T, s *Store, taskID string) {
+	t.Helper()
+	testsupport.WaitForLeaseExpiry(t, s.db, taskID)
 }

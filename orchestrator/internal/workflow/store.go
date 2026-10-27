@@ -19,7 +19,10 @@ import (
 // Store is trusted Go orchestration state, NOT an untrusted agent interface.
 // Admission inputs are assumed to have passed Java authorization/policy checks.
 // The cross-service authentication/gate adapter remains a later ticket.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db          *sql.DB
+	databaseURL string // Retained privately for independent, bounded receipt reconciliation.
+}
 
 var (
 	ErrConflict  = errors.New("workflow admission conflict")
@@ -42,7 +45,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("connect orchestration database: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, databaseURL: databaseURL}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -169,6 +172,10 @@ func isUnique(err error) bool {
 // conflicts. Active-run uniqueness is enforced by durable Jira/GitLab identity,
 // not the caller-provided SubjectKey, which is only a scoped display label.
 func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error) {
+	return s.admit(ctx, c, nil, nil)
+}
+
+func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInventory, profile *syntheticProfile) (AdmissionReceipt, error) {
 	if err := c.validate(); err != nil {
 		return AdmissionReceipt{}, err
 	}
@@ -220,9 +227,34 @@ func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error
 	if err != nil {
 		_ = tx.Rollback()
 		if isUnique(err) {
-			return s.lookupConflict(ctx, c.CommandID, canonicalDigest)
+			r, lookup := s.lookupConflict(ctx, c.CommandID, canonicalDigest)
+			if lookup == nil && inventory != nil {
+				want := *inventory
+				want.RunID = r.RunID
+				lookup = matchInventory(ctx, s.db, want)
+				if errors.Is(lookup, sql.ErrNoRows) {
+					lookup = errCancellationRejected
+				}
+			}
+			if lookup == nil && profile != nil {
+				lookup = matchSyntheticProfile(ctx, s.db, r.RunID, *profile)
+			}
+			return r, lookup
 		}
 		return AdmissionReceipt{}, fmt.Errorf("insert workflow run: %w", err)
+	}
+	if profile != nil {
+		if err := insertSyntheticProfile(ctx, tx, runID, c.PolicyEpoch, *profile); err != nil {
+			return AdmissionReceipt{}, err
+		}
+	}
+	if inventory != nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO orchestration.workflow_execution_inventories
+            (run_id,keeper_id,boot_id,keeper_pid,keeper_start,synthetic_prefix) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)`,
+			runID, inventory.Keeper.ID, inventory.Keeper.BootID, inventory.Keeper.PID, inventory.Keeper.Start, inventory.SyntheticPrefix)
+		if err != nil {
+			return AdmissionReceipt{}, fmt.Errorf("enroll new execution inventory: %w", err)
+		}
 	}
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO orchestration.stage_attempts(
@@ -275,6 +307,16 @@ func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error
 		return AdmissionReceipt{}, fmt.Errorf("enqueue outbox: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
+		if profile != nil {
+			return s.reconcileBoundedAdmission(ctx, c, *profile)
+		}
+		if inventory != nil {
+			r, lookup := s.reconcileExecutionAdmission(ctx, c, *inventory)
+			if lookup == nil || errors.Is(lookup, errCancellationConflict) {
+				return r, lookup
+			}
+			return AdmissionReceipt{}, &cancellationUnknownError{err}
+		}
 		return AdmissionReceipt{}, fmt.Errorf("commit admission: %w", err)
 	}
 	return AdmissionReceipt{RunID: runID, AttemptID: attemptID, TaskID: taskID}, nil
@@ -321,6 +363,9 @@ func (s *Store) ClaimForRun(ctx context.Context, runID, claimant string, leaseSe
 	if strings.TrimSpace(runID) == "" || strings.TrimSpace(claimant) == "" ||
 		len(claimant) > 128 || leaseSeconds < 1 || leaseSeconds > 300 {
 		return TaskLease{}, errors.New("invalid claim parameters")
+	}
+	if lease, handled, err := s.claimBounded(ctx, runID, claimant, leaseSeconds); handled || err != nil {
+		return lease, err
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -389,8 +434,43 @@ func (s *Store) Heartbeat(ctx context.Context, lease TaskLease, leaseSeconds int
 	if leaseSeconds < 1 || leaseSeconds > 300 {
 		return time.Time{}, errors.New("invalid lease duration")
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer tx.Rollback()
+	// Use the same run -> task order as claims and transitions. A shared run
+	// lock prevents its active stage from changing while this lease is renewed.
+	var state string
+	var policyEpoch int64
+	err = tx.QueryRowContext(ctx, `SELECT state,policy_epoch FROM orchestration.workflow_runs
+        WHERE run_id=$1::uuid FOR SHARE`, lease.RunID).Scan(&state, &policyEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("lock workflow for heartbeat: %w", err)
+	}
+	if state != lease.Stage {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err := checkBoundedPolicy(ctx, tx, lease.RunID, policyEpoch); err != nil {
+		return time.Time{}, err
+	}
+	// Lock by stable identity only. An expiry predicate evaluated before a lock
+	// wait could remain true for an unchanged tuple after the lease has expired.
+	var taskID string
+	err = tx.QueryRowContext(ctx, `SELECT task_id::text FROM orchestration.task_deliveries
+        WHERE task_id=$1::uuid AND run_id=$2::uuid FOR UPDATE`, lease.TaskID, lease.RunID).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrLeaseLost
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("lock task for heartbeat: %w", err)
+	}
 	var expires time.Time
-	err := s.db.QueryRowContext(ctx, `
+	// This fresh statement evaluates DB time only after both locks are held.
+	err = tx.QueryRowContext(ctx, `
         UPDATE orchestration.task_deliveries t
         SET lease_expires_at=clock_timestamp()+($5::int*interval '1 second'),
             updated_at=clock_timestamp()
@@ -407,6 +487,9 @@ func (s *Store) Heartbeat(ctx context.Context, lease TaskLease, leaseSeconds int
 	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("heartbeat task: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return time.Time{}, fmt.Errorf("commit heartbeat: %w", err)
 	}
 	return expires, nil
 }

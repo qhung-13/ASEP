@@ -23,6 +23,11 @@ func TestDevTokenRejectsSymlinkAndLoosePermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The disposable runner uses umask 077. Establish the unsafe fixture mode
+	// explicitly rather than relying on the caller's process umask.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := readPrivateDevToken(path); err == nil {
 		t.Fatal("world-readable token accepted")
 	}

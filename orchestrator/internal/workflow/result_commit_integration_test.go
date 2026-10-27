@@ -105,6 +105,16 @@ func commitFaultProxy(t *testing.T, mode string) (string, <-chan struct{}) {
 					if err != nil {
 						return
 					}
+					// Additional deterministic RF-10 cut points. Match only fixed
+					// SQL vocabulary in private frames; never log protocol bytes.
+					cut := (mode == "before-policy" && strings.Contains(string(packet[5:]), "orchestration.workflow_synthetic_policies")) ||
+						(mode == "before-task-update" && strings.Contains(string(packet[5:]), "UPDATE orchestration.task_deliveries")) ||
+						(mode == "before-effect" && strings.Contains(string(packet[5:]), "INSERT INTO orchestration.workflow_synthetic_effects"))
+					if cut && (packet[0] == 'Q' || packet[0] == 'P') && once.CompareAndSwap(false, true) {
+						_ = listener.Close()
+						close(injected)
+						return
+					}
 					if packet[0] == 'Q' && strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(string(packet[5:]), "\x00")), "commit") && once.CompareAndSwap(false, true) {
 						if mode == "before-forward" {
 							close(injected)

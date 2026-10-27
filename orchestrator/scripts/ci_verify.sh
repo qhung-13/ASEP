@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -363,7 +363,7 @@ v8_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U
 echo 'RF-09 populated V8 -> V9 compatibility PASS: original message identities, codecs, receipts and retry accounting retained'
 
 phase='Go vet and unit regressions'
-run_bounded 120 go vet -tags=integration ./...
+run_bounded 120 go vet -tags=integration,postgresrestart ./...
 run_bounded 120 go test -race -count=1 -timeout=90s ./...
 phase='integration test discovery'
 run_bounded 60 go test -tags=integration -list '^Test' ./... > "$private_dir/discovery"
@@ -434,12 +434,92 @@ for expected in \
   TestMessagingCancellationDuringDelivery \
   TestMessagingCommitResponseLoss \
   TestMessagingInboxConstraintsAndPermissions \
-  TestMessagingProcessCrashBeforeACK; do
+  TestMessagingProcessCrashBeforeACK \
+  TestOutageBeforeOperationAndReconciliation \
+  TestOutagePolicyLookupFailsClosed \
+  TestOutageMidTransactionRollbackEvidence \
+  TestOutageRepeatedRecoveryPreservesReceipt \
+  TestOutagePolicyRevocationSerialization; do
   python3 - "$private_dir/discovery" "$expected" <<'PY'
 import sys
 assert sys.argv[2] in open(sys.argv[1]).read().splitlines(), 'required test missing'
 PY
 done
+phase='RF-10 controlled restart test discovery'
+run_bounded 60 go test -tags=integration,postgresrestart -list '^TestOutageDatabaseRestart$' ./internal/workflow > "$private_dir/restart-discovery"
+python3 - "$private_dir/restart-discovery" <<'PY'
+import sys
+assert 'TestOutageDatabaseRestart' in open(sys.argv[1]).read().splitlines(), 'required restart test missing'
+PY
+if [[ "$mode" == all || "$mode" == rf10 ]]; then
+  phase='RF-10 actual owned PostgreSQL restart and B0 re-proof'
+  mkdir -m 700 "$private_dir/outage-control"
+  # Only this trusted runner, never a worker/controller child, receives lifecycle
+  # authority. Recheck the exact recorded ID and ownership before each action.
+  wait_restart_flag() {
+    local flag=$1
+    for _ in {1..150}; do
+      [[ -f "$private_dir/outage-control/$flag" && ! -L "$private_dir/outage-control/$flag" ]] && return 0
+      kill -0 "$active_group" 2>/dev/null || return 1
+      sleep 0.1
+    done
+    return 1
+  }
+  setsid timeout --signal=TERM --kill-after=5s 120s env \
+    ASEP_VN_T11_OUTAGE_CONTROL="$private_dir/outage-control" \
+    go test -race -count=1 -tags=integration,postgresrestart -timeout=90s -v \
+      -run '^TestOutageDatabaseRestart$' ./internal/workflow &
+  active_group=$!
+  wait_restart_flag ready
+  actual="$(docker_cmd inspect --format "{{ index .Config.Labels \"$owner_label\" }}" "$postgres_id")"
+  [[ "$actual" == "$run_id" ]] || fail
+  docker_cmd stop --time 5 "$postgres_id" > "$private_dir/restart-stop.log" 2>&1
+  [[ "$(docker_cmd inspect --format '{{.State.Running}}' "$postgres_id")" == false ]] || fail
+  printf 'offline\n' > "$private_dir/outage-control/offline"
+  wait_restart_flag observed
+  actual="$(docker_cmd inspect --format "{{ index .Config.Labels \"$owner_label\" }}" "$postgres_id")"
+  [[ "$actual" == "$run_id" ]] || fail
+  docker_cmd start "$postgres_id" > "$private_dir/restart-start.log" 2>&1
+  for _ in {1..100}; do
+    docker_cmd exec "$postgres_id" pg_isready -U postgres -d "$database" > "$private_dir/restart-ready.log" 2>&1 && break
+    sleep 0.1
+  done
+  docker_cmd exec "$postgres_id" pg_isready -U postgres -d "$database" > "$private_dir/restart-ready.log" 2>&1
+  prior_port="$port"
+  port="$(docker_cmd inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$postgres_id")"
+  [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 && "$port" -le 65535 ]] || fail
+  printf '%s\n' "$port" > "$private_dir/outage-control/server-port"
+  export ASEP_ORCHESTRATOR_DATABASE_URL="postgres://asep_orch_runtime:${runtime_password}@127.0.0.1:${port}/${database}?sslmode=disable"
+  export ASEP_VN_T11_UNREADABLE_DATABASE_URL="postgres://asep_orch_probe:${probe_password}@127.0.0.1:${port}/${database}?sslmode=disable"
+  if [[ "$prior_port" != "$port" ]]; then echo 'RF-10: Docker reassigned the owned loopback port; fresh B0 proof remains mandatory'; fi
+  printf 'server-up\n' > "$private_dir/outage-control/server-up"
+  wait_restart_flag stale-proof-rejected
+  # A restart intentionally invalidates B0's server-start proof. The test must
+  # first demonstrate rejection and denied runtime UPDATE. Only the trusted
+  # owner-verified harness may re-enroll this same disposable instance/nonce.
+  actual="$(docker_cmd inspect --format "{{ index .Config.Labels \"$owner_label\" }}" "$postgres_id")"
+  [[ "$actual" == "$run_id" ]] || fail
+  docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" > "$private_dir/reproof-result" <<SQL
+UPDATE asep_test_harness.instance SET server_started_at=pg_postmaster_start_time()
+  WHERE singleton AND nonce='${nonce}' AND database_name=current_database()
+    AND server_started_at<>pg_postmaster_start_time() RETURNING 1;
+SQL
+  [[ "$(cat "$private_dir/reproof-result")" == 1 ]] || fail
+  printf 'restored\n' > "$private_dir/outage-control/restored"
+  wait "$active_group"
+  active_group=''
+  echo 'RF-10 actual PostgreSQL restart PASS: stale B0 proof rejected before trusted same-container re-enrollment; runtime privileges unchanged'
+fi
+if [[ "$mode" == rf10 ]]; then
+  phase='RF-10 connection, policy, uncertain COMMIT and process recovery'
+  run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v \
+    -run '^Test(Outage|ResultCommitResponseLoss|RetryCommitResponseLoss|MessagingCommitResponseLoss|CancellationCommitResponseLoss|CancellationFinalizationCommitResponseLoss|ExecutionCommitResponseLoss|MessagingProcessCrashBeforeACK|ResultProcessCrashAfterCommitBeforeACK|WorkerProcessCrashReclaimsSameTask)' ./...
+  phase='RF-10 repeated policy serialization and restored lookup'
+  run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
+    -run '^TestOutage(PolicyRevocationSerialization|RepeatedRecoveryPreservesReceipt)$' ./internal/workflow
+  echo 'RF-10 focused verification PASS'
+  exit 0
+fi
 if [[ "$mode" == rf09 ]]; then
   phase='RF-09 durable synthetic sender/receiver recovery'
   run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
@@ -506,4 +586,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, V1-V9, B0/B1/B2/RF-06/RF-07/RF-08/RF-09 regressions'
+echo 'VN-T11 disposable verification PASS: proof guard, V1-V9, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'

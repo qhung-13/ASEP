@@ -72,6 +72,21 @@ func TestSyntheticHandlerAuthAndHealth(t *testing.T) {
 		t.Fatalf("valid token: %d", got)
 	}
 }
+
+func TestManualTicketAdmissionHasNoExposedEndpoint(t *testing.T) {
+	f := &fakeStore{}
+	handler, token := newTestHandler(t, f)
+	for _, path := range []string{"/v1/admissions", "/v1/manual-ticket-admissions"} {
+		for _, auth := range []string{"", "Bearer " + token} {
+			if response := send(handler, "POST", path, auth, `{"role":"OWNER","actor":"spoofed"}`); response.Code != http.StatusNotFound {
+				t.Fatal("private manual intake became an exposed API")
+			}
+		}
+	}
+	if f.claims+f.statuses+f.heartbeats != 0 {
+		t.Fatal("unconfigured admission endpoint reached durable Store")
+	}
+}
 func TestSyntheticHandlerRejectsInvalidJSON(t *testing.T) {
 	f := &fakeStore{}
 	handler, token := newTestHandler(t, f)

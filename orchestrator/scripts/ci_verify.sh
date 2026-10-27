@@ -17,7 +17,12 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10|manual-admission) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+# The cross-component fixture is required in full and manual-admission runs.
+# Other focused VN-T11 modes keep their existing toolchain requirements.
+if [[ "$mode" == all || "$mode" == manual-admission ]]; then
+  command -v java >/dev/null || { echo 'ERROR: Java 21+ required for private admission fixture' >&2; exit 2; }
+fi
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -85,6 +90,20 @@ run_bounded() {
   if [[ "$result" != 0 ]]; then stop_active; return "$result"; fi
   active_group=''
 }
+
+if [[ "$mode" == all || "$mode" == manual-admission ]]; then
+  phase='compile private Java admission pipe peer'
+  export ASEP_VN_T12_JAVA_BIN="$(command -v java)"
+  export ASEP_VN_T12_JAVA_CLASSPATH_FILE="$private_dir/java-classpath"
+  maven_options=(--batch-mode --no-transfer-progress)
+  if [[ "${ASEP_VN_T12_MAVEN_OFFLINE:-false}" == true ]]; then maven_options+=(--offline); fi
+  # Maven owns dependency resolution; no host-wide jar scanning or temporary overlays.
+  cd ../backend
+  run_bounded 180 ./mvnw "${maven_options[@]}" -Dtest=ManualAdmissionProcessFixtureTest \
+    "-Dasep.manualBridge.classpathFile=$ASEP_VN_T12_JAVA_CLASSPATH_FILE" test
+  cd ../orchestrator
+  [[ -s "$ASEP_VN_T12_JAVA_CLASSPATH_FILE" ]] || fail
+fi
 
 phase='image availability'
 for image in postgres:17-alpine flyway/flyway:11; do
@@ -187,7 +206,9 @@ index_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$data
   "SELECT count(*) FROM pg_indexes WHERE schemaname='orchestration' AND indexname='uq_orch_one_active_canonical_subject'")"
 [[ "$index_count" == 1 ]] || fail
 docker_cmd exec "$postgres_id" postgres --version
-docker_cmd logs "$flyway_id" 2>&1 | python3 -c 'import sys; print(next((s.strip() for s in sys.stdin if s.startswith("Flyway ")), "Flyway version unavailable"))'
+# Drain the bounded migrator log before exiting; an early next(generator)
+# closes Docker's output pipe and can fail this safety gate under pipefail.
+docker_cmd logs "$flyway_id" 2>&1 | python3 -c 'import sys; print(next(iter([s.strip() for s in sys.stdin if s.startswith("Flyway ")]), "Flyway version unavailable"))'
 go version
 go list -m github.com/jackc/pgx/v5
 git rev-parse HEAD
@@ -407,6 +428,7 @@ for expected in \
   TestProcessCrashRestartKeepsRunAndLease \
   TestDisposableProofRejectsUnsafeTargetsBeforeMutation \
   TestDisposableProofRuntimeCannotModifyMarker \
+  TestHarnessVersionParserDrainsLog \
   TestRuntimeCannotRewriteTransitionAudit \
   TestConcurrentAdmissionReplayAndPayloadConflict \
   TestConcurrentAdmissionCanonicalSubjectSingleActiveRun \
@@ -462,6 +484,12 @@ for expected in \
   TestRetryCommitResponseLoss \
   TestRetryAdmissionReconciliation \
   TestRetryAdmissionCommitResponseLoss \
+  TestManualTicketJavaGoContractVector \
+  TestManualTicketDurableReplayAndCancellation \
+  TestManualTicketConcurrentCanonicalSubject \
+  TestManualTicketUncertainCommitRecovery \
+  TestManualTicketJavaGoFailClosedIntegration \
+  TestManualTicketAdmissionHasNoExposedEndpoint \
   TestMessagingDuplicateAndReorderedDelivery \
   TestMessagingRejectsConflictsAndAuthority \
   TestMessagingDispatchBoundsAndLateEvidence \
@@ -561,6 +589,16 @@ if [[ "$mode" == rf10 ]]; then
   run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
     -run '^TestOutage(PolicyRevocationSerialization|RepeatedRecoveryPreservesReceipt)$' ./internal/workflow
   echo 'RF-10 focused verification PASS'
+  exit 0
+fi
+if [[ "$mode" == manual-admission ]]; then
+  phase='private fixture ticket admission contract, durability and COMMIT recovery'
+  run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
+    -run '^TestManualTicket' ./...
+  phase='repeated canonical manual-admission concurrency'
+  run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
+    -run '^TestManualTicketConcurrentCanonicalSubject$' ./internal/workflow
+  echo 'VN-T12 private fixture verification PASS; production Jira/service authentication not exercised'
   exit 0
 fi
 if [[ "$mode" == rf09 ]]; then

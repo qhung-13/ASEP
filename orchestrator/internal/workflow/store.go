@@ -172,6 +172,10 @@ func isUnique(err error) bool {
 // conflicts. Active-run uniqueness is enforced by durable Jira/GitLab identity,
 // not the caller-provided SubjectKey, which is only a scoped display label.
 func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error) {
+	return s.admit(ctx, c, nil)
+}
+
+func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInventory) (AdmissionReceipt, error) {
 	if err := c.validate(); err != nil {
 		return AdmissionReceipt{}, err
 	}
@@ -223,9 +227,26 @@ func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error
 	if err != nil {
 		_ = tx.Rollback()
 		if isUnique(err) {
-			return s.lookupConflict(ctx, c.CommandID, canonicalDigest)
+			r, lookup := s.lookupConflict(ctx, c.CommandID, canonicalDigest)
+			if lookup == nil && inventory != nil {
+				want := *inventory
+				want.RunID = r.RunID
+				lookup = matchInventory(ctx, s.db, want)
+				if errors.Is(lookup, sql.ErrNoRows) {
+					lookup = errCancellationRejected
+				}
+			}
+			return r, lookup
 		}
 		return AdmissionReceipt{}, fmt.Errorf("insert workflow run: %w", err)
+	}
+	if inventory != nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO orchestration.workflow_execution_inventories
+            (run_id,keeper_id,boot_id,keeper_pid,keeper_start,synthetic_prefix) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)`,
+			runID, inventory.Keeper.ID, inventory.Keeper.BootID, inventory.Keeper.PID, inventory.Keeper.Start, inventory.SyntheticPrefix)
+		if err != nil {
+			return AdmissionReceipt{}, fmt.Errorf("enroll new execution inventory: %w", err)
+		}
 	}
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO orchestration.stage_attempts(
@@ -278,6 +299,13 @@ func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error
 		return AdmissionReceipt{}, fmt.Errorf("enqueue outbox: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
+		if inventory != nil {
+			r, lookup := s.reconcileExecutionAdmission(ctx, c, *inventory)
+			if lookup == nil || errors.Is(lookup, errCancellationConflict) {
+				return r, lookup
+			}
+			return AdmissionReceipt{}, &cancellationUnknownError{err}
+		}
 		return AdmissionReceipt{}, fmt.Errorf("commit admission: %w", err)
 	}
 	return AdmissionReceipt{RunID: runID, AttemptID: attemptID, TaskID: taskID}, nil

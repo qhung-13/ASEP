@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -45,7 +45,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_v6 flyway postgres; do
+  for resource in flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -263,6 +263,43 @@ legacy_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qA
 [[ "$legacy_before" == "$legacy_after" ]] || fail
 echo 'RF-07A populated V5 -> V6 compatibility PASS: all legacy rows/fields/receipts preserved'
 
+phase='populated V6 cancellation compatibility baseline'
+run_bounded 90 go test -race -count=1 -tags=integration -timeout=60s -v \
+  -run '^TestCancellationReplayAndFencing$' ./internal/workflow
+control_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT count(*) FROM orchestration.workflow_transitions WHERE control_kind='CANCEL_REQUEST'")"
+[[ "$control_count" == 1 ]] || fail
+cat > "$private_dir/v6-snapshot.sql" <<'SQL'
+SELECT md5(jsonb_build_array(
+  (SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM orchestration.workflow_runs r),
+  (SELECT jsonb_agg(to_jsonb(a) ORDER BY attempt_id) FROM orchestration.stage_attempts a),
+  (SELECT jsonb_agg(to_jsonb(t) ORDER BY task_id) FROM orchestration.task_deliveries t),
+  (SELECT jsonb_agg(to_jsonb(t) - ARRAY['control_request_transition_id','control_inventory_sha256',
+    'control_cleanup_sha256'] ORDER BY transition_id) FROM orchestration.workflow_transitions t),
+  (SELECT jsonb_agg(to_jsonb(o) ORDER BY message_id) FROM orchestration.workflow_outbox o),
+  (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM orchestration.workflow_result_receipts r)
+)::text);
+SQL
+v6_before="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v6-snapshot.sql")"
+phase='Flyway V7 populated upgrade'
+docker_cmd create --cidfile "$private_dir/flyway_v7.cid" \
+  --name "asep-vnt11-flyway-v7-$run_id" --label "$owner_label=$run_id" \
+  --network host --env-file "$private_dir/flyway.env" \
+  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 -target=7 migrate >"$private_dir/flyway-v7-create.log" 2>&1
+flyway_v7_id="$(cat "$private_dir/flyway_v7.cid")"
+docker_cmd start "$flyway_v7_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v7_id" > "$private_dir/flyway-v7-exit"
+[[ "$(cat "$private_dir/flyway-v7-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7' ]] || fail
+v6_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v6-snapshot.sql")"
+[[ "$v6_before" == "$v6_after" ]] || fail
+inventory_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  'SELECT count(*) FROM orchestration.workflow_cancellation_inventories')"
+[[ "$inventory_count" == 0 ]] || fail
+echo 'RF-07B populated V6 -> V7 compatibility PASS: legacy cancellation stays pending, no fabricated inventory; original hashes/receipts/rows retained'
+
 phase='Go vet and unit regressions'
 run_bounded 120 go vet -tags=integration ./...
 run_bounded 120 go test -race -count=1 -timeout=90s ./...
@@ -303,12 +340,36 @@ for expected in \
   TestCancellationRollbackOnAuditFailure \
   TestCancellationCommitResponseLoss \
   TestCancellationReconciliationDeadline \
-  TestCancellationAuditConstraintsAndPermissions; do
+  TestCancellationAuditConstraintsAndPermissions \
+  TestCancellationFinalizationProcesses \
+  TestExecutionCancellationStartup \
+  TestExecutionUnboundAndOlderEpochs \
+  TestExecutionCleanupEvidence \
+  TestCancellationFinalizationLegacy \
+  TestCancellationFinalizationConcurrency \
+  TestCancellationFinalizationControllerCrashes \
+  TestCancellationFinalizationRollback \
+  TestCancellationFinalizationCommitResponseLoss \
+  TestCancellationFinalizationPreservesAcceptedResult \
+  TestExecutionCommitResponseLoss \
+  TestExecutionCanonicalEvidence \
+  TestExecutionRejectsIncompleteProof \
+  TestExecutionAppendOnlyAndFinalizationConstraints; do
   python3 - "$private_dir/discovery" "$expected" <<'PY'
 import sys
 assert sys.argv[2] in open(sys.argv[1]).read().splitlines(), 'required test missing'
 PY
 done
+if [[ "$mode" == rf07b ]]; then
+  phase='RF-07B owned termination, cleanup and durable finalization'
+  run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
+    -run '^Test(Execution|CancellationFinalization)' ./internal/workflow
+  phase='RF-07B repeated registration/startup and finalization races'
+  run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
+    -run '^Test(ExecutionCancellationStartup|CancellationFinalizationConcurrency)$' ./internal/workflow
+  echo 'RF-07B focused verification PASS: owned termination/reap, immutable evidence, restart and finalization faults'
+  exit 0
+fi
 if [[ "$mode" == rf07a ]]; then
   phase='RF-07A durable cancellation request regressions'
   run_bounded 120 go test -race -count=1 -tags=integration -timeout=90s -v \
@@ -345,4 +406,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, V1-V6, B0/B1/B2/RF-06/RF-07A regressions'
+echo 'VN-T11 disposable verification PASS: proof guard, V1-V7, B0/B1/B2/RF-06/RF-07A/RF-07B regressions'

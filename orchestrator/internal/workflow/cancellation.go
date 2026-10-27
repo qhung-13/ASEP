@@ -211,6 +211,9 @@ func (s *Store) requestCancellation(ctx context.Context, c cancellationRequest) 
 		}
 		return cancellationReceipt{}, fmt.Errorf("insert cancellation stop intent: %w", err)
 	}
+	if err := freezeExecutionInventory(ctx, tx, c.Task.RunID, id); err != nil {
+		return cancellationReceipt{}, fmt.Errorf("freeze cancellation inventory: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
 		r, lookupErr := s.reconcileCancellation(ctx, c)
 		if lookupErr == nil || errors.Is(lookupErr, errCancellationConflict) {

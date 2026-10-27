@@ -28,6 +28,12 @@ type resultControllerConfig struct {
 // It is not a worker/agent or a production result endpoint. An environment flag
 // alone cannot authorize mutation: private pipes, B0 proof and run scope follow.
 func TestMain(m *testing.M) {
+	if os.Getenv("ASEP_RF07B_CHILD") == "true" {
+		os.Exit(runCancellationLeaf())
+	}
+	if os.Getenv("ASEP_RF07B_CONTROLLER") == "true" {
+		os.Exit(runFinalizationController())
+	}
 	if os.Getenv(resultControllerFlag) == "true" {
 		os.Exit(runResultController())
 	}

@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 database="asep_vnt11_${run_id}"
@@ -45,7 +45,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
+  for resource in flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -334,6 +334,34 @@ profile_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$da
 [[ "$profile_count" == 0 ]] || fail
 echo 'RF-08 populated V7 -> V8 compatibility PASS: all V1-V7 facts unchanged; no invented legacy retry profile'
 
+phase='populated V8 retry compatibility baseline'
+run_bounded 90 go test -race -count=1 -tags=integration -timeout=60s -v \
+  -run '^TestRetrySemanticBudgetRecovery$' ./internal/workflow
+cp "$private_dir/v7-snapshot.sql" "$private_dir/v8-snapshot.sql"
+cat >> "$private_dir/v8-snapshot.sql" <<'SQL'
+
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_profiles t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_policies t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_gate_evidence t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_retry_receipts t;
+SQL
+v8_before="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v8-snapshot.sql")"
+phase='Flyway V9 populated upgrade'
+docker_cmd create --cidfile "$private_dir/flyway_v9.cid" \
+  --name "asep-vnt11-flyway-v9-$run_id" --label "$owner_label=$run_id" \
+  --network host --env-file "$private_dir/flyway.env" \
+  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 -target=9 migrate >"$private_dir/flyway-v9-create.log" 2>&1
+flyway_v9_id="$(cat "$private_dir/flyway_v9.cid")"
+docker_cmd start "$flyway_v9_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v9_id" > "$private_dir/flyway-v9-exit"
+[[ "$(cat "$private_dir/flyway-v9-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7,8,9' ]] || fail
+v8_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v8-snapshot.sql")"
+[[ "$v8_before" == "$v8_after" ]] || fail
+echo 'RF-09 populated V8 -> V9 compatibility PASS: original message identities, codecs, receipts and retry accounting retained'
+
 phase='Go vet and unit regressions'
 run_bounded 120 go vet -tags=integration ./...
 run_bounded 120 go test -race -count=1 -timeout=90s ./...
@@ -397,12 +425,31 @@ for expected in \
   TestRetryRejectsStaleAuthority \
   TestRetryCompletionAndCancellationRaces \
   TestRetryRollbackAndPermissions \
-  TestRetryCommitResponseLoss; do
+  TestRetryCommitResponseLoss \
+  TestMessagingDuplicateAndReorderedDelivery \
+  TestMessagingRejectsConflictsAndAuthority \
+  TestMessagingDispatchBoundsAndLateEvidence \
+  TestMessagingDeferredAndForgedCallback \
+  TestMessagingWrongTransportReceipt \
+  TestMessagingCancellationDuringDelivery \
+  TestMessagingCommitResponseLoss \
+  TestMessagingInboxConstraintsAndPermissions \
+  TestMessagingProcessCrashBeforeACK; do
   python3 - "$private_dir/discovery" "$expected" <<'PY'
 import sys
 assert sys.argv[2] in open(sys.argv[1]).read().splitlines(), 'required test missing'
 PY
 done
+if [[ "$mode" == rf09 ]]; then
+  phase='RF-09 durable synthetic sender/receiver recovery'
+  run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
+    -run '^TestMessaging' ./internal/workflow
+  phase='RF-09 repeated duplicate delivery and process crash'
+  run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
+    -run '^TestMessaging(DuplicateAndReorderedDelivery|ProcessCrashBeforeACK)$' ./internal/workflow
+  echo 'RF-09 focused verification PASS'
+  exit 0
+fi
 if [[ "$mode" == rf08 ]]; then
   phase='RF-08 bounded retries, semantic budgets and recovery'
   run_bounded 180 go test -race -count=1 -tags=integration -timeout=120s -v \
@@ -459,4 +506,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, V1-V8, B0/B1/B2/RF-06/RF-07/RF-08 regressions'
+echo 'VN-T11 disposable verification PASS: proof guard, V1-V9, B0/B1/B2/RF-06/RF-07/RF-08/RF-09 regressions'

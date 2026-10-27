@@ -357,7 +357,11 @@ func (s *Store) acknowledgeSyntheticDelivery(ctx context.Context, r inboxReceipt
 	if err != nil {
 		return err
 	}
-	if actual != r {
+	// JSON preserves the instant, but not time.Time's Location identity. Keep
+	// timestamp precision and every other receipt field in the equality check.
+	sameInstant := actual.ReceivedAt.Equal(r.ReceivedAt)
+	actual.ReceivedAt = r.ReceivedAt
+	if !sameInstant || actual != r {
 		return ErrResultConflict
 	}
 	e, err := readStageEnvelope(ctx, tx, r.MessageID)

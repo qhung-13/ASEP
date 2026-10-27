@@ -351,6 +351,76 @@ func TestMessagingInboxConstraintsAndPermissions(t *testing.T) {
 	assertSyntheticEffects(t, s, run, 0, 0)
 }
 
+func TestMessagingReceiptTimestampIdentity(t *testing.T) {
+	s, _, run, e := messagingRun(t, 2)
+	original, err := s.receiveSynthetic(testContext(t), e)
+	if err != nil {
+		t.Fatal("receipt fixture unavailable", err)
+	}
+	before := snapshotFor(t, s, run)
+	for _, field := range []string{"timestamp", "receipt", "hash", "task", "attempt", "version", "disposition"} {
+		t.Run("changed-"+field, func(t *testing.T) {
+			changed := original
+			switch field {
+			case "timestamp":
+				changed.ReceivedAt = changed.ReceivedAt.Add(time.Nanosecond)
+			case "receipt":
+				changed.ReceiptID, _ = freshUUID()
+			case "hash":
+				changed.PayloadSHA256 = strings.Repeat("f", 64)
+			case "task":
+				changed.TaskID, _ = freshUUID()
+			case "attempt":
+				changed.AttemptID, _ = freshUUID()
+			case "version":
+				changed.RunVersion++
+			case "disposition":
+				changed.Disposition = "OBSOLETE"
+			}
+			if err := s.acknowledgeSyntheticDelivery(testContext(t), changed); !errors.Is(err, ErrResultConflict) {
+				t.Fatal("altered receipt was accepted", err)
+			}
+		})
+	}
+	var acks int
+	var status string
+	if err := s.db.QueryRowContext(testContext(t), `SELECT status,(SELECT count(*) FROM orchestration.workflow_synthetic_delivery_receipts WHERE message_id=$1::uuid) FROM orchestration.workflow_outbox WHERE message_id=$1::uuid`, e.MessageID).Scan(&status, &acks); err != nil || status != "PENDING" || acks != 0 {
+		t.Fatal("rejected receipt changed durable acknowledgement", err)
+	}
+	for _, location := range []*time.Location{time.UTC, time.FixedZone("audit-zero-offset", 0), time.FixedZone("audit-offset", 7*60*60)} {
+		t.Run("same-instant-"+location.String(), func(t *testing.T) {
+			ack := original
+			ack.ReceivedAt = ack.ReceivedAt.In(location)
+			if !ack.ReceivedAt.Equal(original.ReceivedAt) {
+				t.Fatal("timezone fixture changed the timestamp instant")
+			}
+			if err := s.acknowledgeSyntheticDelivery(testContext(t), ack); err != nil {
+				t.Fatal("same receipt instant rejected due to location metadata", err)
+			}
+		})
+	}
+	t.Run("json-roundtrip", func(t *testing.T) {
+		wire := original
+		wire.ReceivedAt = wire.ReceivedAt.UTC()
+		body, err := json.Marshal(wire)
+		if err != nil {
+			t.Fatal("receipt encoding failed")
+		}
+		var ack inboxReceipt
+		if json.Unmarshal(body, &ack) != nil || !ack.ReceivedAt.Equal(original.ReceivedAt) {
+			t.Fatal("wire receipt changed timestamp instant")
+		}
+		if err := s.acknowledgeSyntheticDelivery(testContext(t), ack); err != nil {
+			t.Fatal("JSON receipt timestamp representation rejected", err)
+		}
+	})
+	actual, err := queryInbox(testContext(t), s.db, e.MessageID, e.PayloadSHA256)
+	if err != nil || actual != original || snapshotFor(t, s, run) != before {
+		t.Fatal("acknowledgement changed original evidence or workflow", err)
+	}
+	assertSyntheticEffects(t, s, run, 1, 1)
+}
+
 type inboxControllerConfig struct {
 	DatabaseURL, Nonce, Prefix string
 	Envelope                   stageEnvelope
@@ -417,7 +487,8 @@ func startInboxController(t *testing.T, c inboxControllerConfig) *resultControll
 	checkpoint, marker := resultProcessPipe(t)
 	output, ack := resultProcessPipe(t)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
-	cmd.Env = append(testsupport.Environment(), "ASEP_RF09_RECEIVER=true")
+	// Exercise wire timestamps independently of the parent host's timezone.
+	cmd.Env = append(testsupport.Environment(), "ASEP_RF09_RECEIVER=true", "TZ=UTC")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = input, ack, io.Discard
 	cmd.ExtraFiles = []*os.File{marker}
 	cmd.WaitDelay = time.Second
@@ -504,8 +575,13 @@ func TestMessagingProcessCrashBeforeACK(t *testing.T) {
 					t.Fatal("ACK gate failed")
 				}
 				var ack inboxReceipt
-				if json.Unmarshal(awaitResultACK(t, child), &ack) != nil || ack != original {
+				if json.Unmarshal(awaitResultACK(t, child), &ack) != nil || !ack.ReceivedAt.Equal(original.ReceivedAt) {
 					t.Fatal("ACK differed from independent durable receipt")
+				}
+				comparison := ack
+				comparison.ReceivedAt = original.ReceivedAt
+				if comparison != original {
+					t.Fatal("ACK identity differed from independent durable receipt")
 				}
 				awaitResultControllerExit(t, child)
 				if child.waitErr != nil {
@@ -530,8 +606,13 @@ func TestMessagingProcessCrashBeforeACK(t *testing.T) {
 					return inboxReceipt{}, io.ErrUnexpectedEOF
 				})
 			}
-			if err != nil || r != original {
+			if err != nil || !r.ReceivedAt.Equal(original.ReceivedAt) {
 				t.Fatal("process recovery lost exact receipt", err)
+			}
+			comparison := r
+			comparison.ReceivedAt = original.ReceivedAt
+			if comparison != original {
+				t.Fatal("process recovery changed receipt identity")
 			}
 			assertSyntheticEffects(t, s, run, 1, 1)
 		})

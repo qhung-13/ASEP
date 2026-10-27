@@ -714,8 +714,13 @@ func TestCancellationFinalizationControllerCrashes(t *testing.T) {
 		t.Fatal("finalization ACK gate release failed")
 	}
 	var ack finalizationReceipt
-	if json.Unmarshal(awaitResultACK(t, third), &ack) != nil || ack != r {
+	if json.Unmarshal(awaitResultACK(t, third), &ack) != nil || !ack.Control.RequestedAt.Equal(r.Control.RequestedAt) {
 		t.Fatal("finalization ACK control receipt mismatch")
+	}
+	comparison := ack
+	comparison.Control.RequestedAt = r.Control.RequestedAt
+	if comparison != r {
+		t.Fatal("finalization ACK control identity mismatch")
 	}
 	awaitResultControllerExit(t, third)
 	if third.waitErr != nil {

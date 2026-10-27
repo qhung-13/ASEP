@@ -470,6 +470,7 @@ for expected in \
   TestMessagingCancellationDuringDelivery \
   TestMessagingCommitResponseLoss \
   TestMessagingInboxConstraintsAndPermissions \
+  TestMessagingReceiptTimestampIdentity \
   TestMessagingProcessCrashBeforeACK \
   TestMessagingObsoleteUnsentIntent \
   TestMessagingObsoleteDispatchContention \
@@ -588,7 +589,7 @@ if [[ "$mode" == rf07b ]]; then
     -run '^Test(Execution|CancellationFinalization)' ./internal/workflow
   phase='RF-07B repeated registration/startup and finalization races'
   run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
-    -run '^Test(ExecutionCancellationStartup|CancellationFinalizationConcurrency)$' ./internal/workflow
+    -run '^Test(ExecutionCancellationStartup|CancellationFinalizationConcurrency|CancellationFinalizationControllerCrashes)$' ./internal/workflow
   echo 'RF-07B focused verification PASS: owned termination/reap, immutable evidence, restart and finalization faults'
   exit 0
 fi

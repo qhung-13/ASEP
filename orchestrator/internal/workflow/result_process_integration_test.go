@@ -139,7 +139,8 @@ func startResultController(t *testing.T, config resultControllerConfig) *resultC
 	checkpoint, checkpointWriter := resultProcessPipe(t)
 	ack, ackWriter := resultProcessPipe(t)
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
-	command.Env = append(testsupport.Environment(), resultControllerFlag+"=true")
+	// Exercise wire timestamps independently of the parent host's timezone.
+	command.Env = append(testsupport.Environment(), resultControllerFlag+"=true", "TZ=UTC")
 	command.Stdin, command.Stdout, command.Stderr = input, ackWriter, io.Discard
 	command.ExtraFiles = []*os.File{checkpointWriter}
 	command.WaitDelay = time.Second
@@ -284,8 +285,13 @@ func TestResultProcessCrashAfterCommitBeforeACK(t *testing.T) {
 					t.Fatal("application ACK gate release failed")
 				}
 				var acknowledgement advanceReceipt
-				if json.Unmarshal(awaitResultACK(t, child), &acknowledgement) != nil || acknowledgement != original {
+				if json.Unmarshal(awaitResultACK(t, child), &acknowledgement) != nil || !acknowledgement.AcceptedAt.Equal(original.AcceptedAt) {
 					t.Fatal("released application ACK did not contain the independently observed receipt")
+				}
+				comparison := acknowledgement
+				comparison.AcceptedAt = original.AcceptedAt
+				if comparison != original {
+					t.Fatal("released application ACK changed the independently observed receipt identity")
 				}
 				awaitResultControllerExit(t, child)
 				if child.waitErr != nil || snapshotFor(t, observer, run) != accepted {

@@ -474,7 +474,8 @@ func startFinalizationController(t *testing.T, c finalizationControllerConfig) *
 	checkpoint, marker := resultProcessPipe(t)
 	output, ack := resultProcessPipe(t)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
-	cmd.Env = append(testsupport.Environment(), "ASEP_RF07B_CONTROLLER=true")
+	// Exercise wire timestamps independently of the parent host's timezone.
+	cmd.Env = append(testsupport.Environment(), "ASEP_RF07B_CONTROLLER=true", "TZ=UTC")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = input, io.Discard, io.Discard
 	cmd.ExtraFiles = []*os.File{marker, ack}
 	cmd.WaitDelay = time.Second

@@ -172,10 +172,10 @@ func isUnique(err error) bool {
 // conflicts. Active-run uniqueness is enforced by durable Jira/GitLab identity,
 // not the caller-provided SubjectKey, which is only a scoped display label.
 func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error) {
-	return s.admit(ctx, c, nil)
+	return s.admit(ctx, c, nil, nil)
 }
 
-func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInventory) (AdmissionReceipt, error) {
+func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInventory, profile *syntheticProfile) (AdmissionReceipt, error) {
 	if err := c.validate(); err != nil {
 		return AdmissionReceipt{}, err
 	}
@@ -236,9 +236,17 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 					lookup = errCancellationRejected
 				}
 			}
+			if lookup == nil && profile != nil {
+				lookup = matchSyntheticProfile(ctx, s.db, r.RunID, *profile)
+			}
 			return r, lookup
 		}
 		return AdmissionReceipt{}, fmt.Errorf("insert workflow run: %w", err)
+	}
+	if profile != nil {
+		if err := insertSyntheticProfile(ctx, tx, runID, c.PolicyEpoch, *profile); err != nil {
+			return AdmissionReceipt{}, err
+		}
 	}
 	if inventory != nil {
 		_, err = tx.ExecContext(ctx, `INSERT INTO orchestration.workflow_execution_inventories
@@ -299,6 +307,9 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 		return AdmissionReceipt{}, fmt.Errorf("enqueue outbox: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
+		if profile != nil {
+			return s.reconcileBoundedAdmission(ctx, c, *profile)
+		}
 		if inventory != nil {
 			r, lookup := s.reconcileExecutionAdmission(ctx, c, *inventory)
 			if lookup == nil || errors.Is(lookup, errCancellationConflict) {
@@ -352,6 +363,9 @@ func (s *Store) ClaimForRun(ctx context.Context, runID, claimant string, leaseSe
 	if strings.TrimSpace(runID) == "" || strings.TrimSpace(claimant) == "" ||
 		len(claimant) > 128 || leaseSeconds < 1 || leaseSeconds > 300 {
 		return TaskLease{}, errors.New("invalid claim parameters")
+	}
+	if lease, handled, err := s.claimBounded(ctx, runID, claimant, leaseSeconds); handled || err != nil {
+		return lease, err
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
@@ -428,8 +442,9 @@ func (s *Store) Heartbeat(ctx context.Context, lease TaskLease, leaseSeconds int
 	// Use the same run -> task order as claims and transitions. A shared run
 	// lock prevents its active stage from changing while this lease is renewed.
 	var state string
-	err = tx.QueryRowContext(ctx, `SELECT state FROM orchestration.workflow_runs
-        WHERE run_id=$1::uuid FOR SHARE`, lease.RunID).Scan(&state)
+	var policyEpoch int64
+	err = tx.QueryRowContext(ctx, `SELECT state,policy_epoch FROM orchestration.workflow_runs
+        WHERE run_id=$1::uuid FOR SHARE`, lease.RunID).Scan(&state, &policyEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, ErrLeaseLost
 	}
@@ -438,6 +453,9 @@ func (s *Store) Heartbeat(ctx context.Context, lease TaskLease, leaseSeconds int
 	}
 	if state != lease.Stage {
 		return time.Time{}, ErrLeaseLost
+	}
+	if err := checkBoundedPolicy(ctx, tx, lease.RunID, policyEpoch); err != nil {
+		return time.Time{}, err
 	}
 	// Lock by stable identity only. An expiry predicate evaluated before a lock
 	// wait could remain true for an unchanged tuple after the lease has expired.

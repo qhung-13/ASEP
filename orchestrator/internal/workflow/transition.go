@@ -146,6 +146,9 @@ func (s *Store) advanceInvestigation(ctx context.Context, c investigationAdvance
 	if !errors.Is(err, sql.ErrNoRows) {
 		return advanceReceipt{}, err
 	}
+	if err := checkBoundedPolicy(ctx, tx, c.Lease.RunID, c.ExpectedPolicyEpoch); err != nil {
+		return advanceReceipt{}, err
+	}
 	if runMissing || state != "INVESTIGATING" || runVersion != c.ExpectedRunVersion ||
 		policyEpoch != c.ExpectedPolicyEpoch ||
 		sourceFingerprint != c.ExpectedSourceFingerprintSHA256 {

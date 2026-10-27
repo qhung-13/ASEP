@@ -143,7 +143,7 @@ func (s *Store) admitExecution(ctx context.Context, c Admission, keeper keeperId
 	if !keeper.valid() || len(parts) != 3 || !syntheticPrefixPattern.MatchString(parts[0]+":"+parts[1]) {
 		return AdmissionReceipt{}, errCancellationRejected
 	}
-	return s.admit(ctx, c, &executionInventory{SyntheticPrefix: parts[0] + ":" + parts[1], Keeper: keeper})
+	return s.admit(ctx, c, &executionInventory{SyntheticPrefix: parts[0] + ":" + parts[1], Keeper: keeper}, nil)
 }
 
 func lookupExecutionAdmission(ctx context.Context, db executionReader, c Admission, inventory executionInventory) (AdmissionReceipt, error) {

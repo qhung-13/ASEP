@@ -45,7 +45,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
+  for resource in flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -362,6 +362,39 @@ v8_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U
 [[ "$v8_before" == "$v8_after" ]] || fail
 echo 'RF-09 populated V8 -> V9 compatibility PASS: original message identities, codecs, receipts and retry accounting retained'
 
+phase='populated V9 sender/receiver compatibility baseline'
+run_bounded 90 go test -race -count=1 -tags=integration -timeout=60s -v \
+  -run '^TestMessagingDuplicateAndReorderedDelivery$' ./internal/workflow
+cp "$private_dir/v8-snapshot.sql" "$private_dir/v9-snapshot.sql"
+cat >> "$private_dir/v9-snapshot.sql" <<'SQL'
+
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_delivery_policies t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_deliveries t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_delivery_attempts t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_inbox t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_effects t;
+SELECT md5(coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'null')) FROM orchestration.workflow_synthetic_delivery_receipts t;
+SQL
+v9_before="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v9-snapshot.sql")"
+phase='Flyway V10 populated upgrade'
+docker_cmd create --cidfile "$private_dir/flyway_v10.cid" \
+  --name "asep-vnt11-flyway-v10-$run_id" --label "$owner_label=$run_id" \
+  --network host --env-file "$private_dir/flyway.env" \
+  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 -target=10 migrate >"$private_dir/flyway-v10-create.log" 2>&1
+flyway_v10_id="$(cat "$private_dir/flyway_v10.cid")"
+docker_cmd start "$flyway_v10_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v10_id" > "$private_dir/flyway-v10-exit"
+[[ "$(cat "$private_dir/flyway-v10-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7,8,9,10' ]] || fail
+v9_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v9-snapshot.sql")"
+[[ "$v9_before" == "$v9_after" ]] || fail
+disposition_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  'SELECT count(*) FROM orchestration.workflow_synthetic_sender_dispositions')"
+[[ "$disposition_count" == 0 ]] || fail
+echo 'A01 populated V9 -> V10 compatibility PASS: all original facts unchanged; no invented unsent disposition or receiver acknowledgement'
+
 phase='Go vet and unit regressions'
 run_bounded 120 go vet -tags=integration,postgresrestart ./...
 run_bounded 120 go test -race -count=1 -timeout=90s ./...
@@ -407,6 +440,7 @@ for expected in \
   TestExecutionCancellationStartup \
   TestExecutionUnboundAndOlderEpochs \
   TestExecutionCleanupEvidence \
+  TestExecutionStopRejectsInvalidWaitEvidence \
   TestCancellationFinalizationLegacy \
   TestCancellationFinalizationConcurrency \
   TestCancellationFinalizationControllerCrashes \
@@ -426,6 +460,8 @@ for expected in \
   TestRetryCompletionAndCancellationRaces \
   TestRetryRollbackAndPermissions \
   TestRetryCommitResponseLoss \
+  TestRetryAdmissionReconciliation \
+  TestRetryAdmissionCommitResponseLoss \
   TestMessagingDuplicateAndReorderedDelivery \
   TestMessagingRejectsConflictsAndAuthority \
   TestMessagingDispatchBoundsAndLateEvidence \
@@ -435,6 +471,12 @@ for expected in \
   TestMessagingCommitResponseLoss \
   TestMessagingInboxConstraintsAndPermissions \
   TestMessagingProcessCrashBeforeACK \
+  TestMessagingObsoleteUnsentIntent \
+  TestMessagingObsoleteDispatchContention \
+  TestMessagingObsoletePreservesUncertainty \
+  TestMessagingObsoleteRequiresImmutableHistory \
+  TestMessagingObsoleteCommitResponseLoss \
+  TestMessagingObsoleteConstraintsAndPermissions \
   TestOutageBeforeOperationAndReconciliation \
   TestOutagePolicyLookupFailsClosed \
   TestOutageMidTransactionRollbackEvidence \
@@ -526,7 +568,7 @@ if [[ "$mode" == rf09 ]]; then
     -run '^TestMessaging' ./internal/workflow
   phase='RF-09 repeated duplicate delivery and process crash'
   run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
-    -run '^TestMessaging(DuplicateAndReorderedDelivery|ProcessCrashBeforeACK)$' ./internal/workflow
+    -run '^TestMessaging(DuplicateAndReorderedDelivery|ProcessCrashBeforeACK|ObsoleteDispatchContention|ObsoletePreservesUncertainty)$' ./internal/workflow
   echo 'RF-09 focused verification PASS'
   exit 0
 fi
@@ -536,7 +578,7 @@ if [[ "$mode" == rf08 ]]; then
     -run '^TestRetry' ./internal/workflow
   phase='RF-08 repeated semantic/cancellation races'
   run_bounded 120 go test -race -count=5 -tags=integration -timeout=90s -v \
-    -run '^TestRetry(CompletionAndCancellationRaces|ConcurrentDecisions)$' ./internal/workflow
+    -run '^TestRetry(CompletionAndCancellationRaces|ConcurrentDecisions|AdmissionReconciliation)$' ./internal/workflow
   echo 'RF-08 focused verification PASS'
   exit 0
 fi
@@ -586,4 +628,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, V1-V9, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'
+echo 'VN-T11 disposable verification PASS: proof guard, V1-V10, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'

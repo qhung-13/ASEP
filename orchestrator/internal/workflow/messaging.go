@@ -13,6 +13,7 @@ import (
 var (
 	errDeliveryDeferred  = errors.New("synthetic delivery deferred; no progression authority")
 	errDeliveryExhausted = errors.New("synthetic delivery limit exhausted; reconcile original identity")
+	errDeliveryObsolete  = errors.New("synthetic intent obsolete without delivery")
 )
 
 type stageEnvelope struct {
@@ -205,6 +206,51 @@ func (s *Store) reconcileInbox(ctx context.Context, e stageEnvelope) (inboxRecei
 	return inboxReceipt{}, &resultUnknownError{err}
 }
 
+// V9 remains readable during the populated upgrade tests. Absence of the V10
+// table provides no terminal evidence. All writers/receivers serialize on run.
+func unsentDisposition(ctx context.Context, db executionReader, e stageEnvelope) (bool, error) {
+	var available bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('orchestration.workflow_synthetic_sender_dispositions') IS NOT NULL`).Scan(&available); err != nil || !available {
+		return false, err
+	}
+	var run, hash string
+	var version int64
+	err := db.QueryRowContext(ctx, `SELECT run_id::text,payload_sha256,intent_run_version FROM orchestration.workflow_synthetic_sender_dispositions WHERE message_id=$1::uuid`, e.MessageID).Scan(&run, &hash, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if run != e.RunID || hash != e.PayloadSHA256 || version != e.RunVersion {
+		return false, ErrResultConflict
+	}
+	return true, nil
+}
+
+func (s *Store) reconcileUnsentDisposition(ctx context.Context, e stageEnvelope) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	db, err := sql.Open("pgx", s.databaseURL)
+	if err != nil {
+		return &resultUnknownError{err}
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	found, err := unsentDisposition(ctx, db, e)
+	if err != nil {
+		if errors.Is(err, ErrResultConflict) {
+			return err
+		}
+		return &resultUnknownError{err}
+	}
+	if !found {
+		return &resultUnknownError{}
+	}
+	return errDeliveryObsolete
+}
+
 // The receiver's *synthetic* logical effect and immutable inbox COMMIT together.
 // This models an idempotent receiver contract; it proves no remote exactly-once
 // property. A receipt acknowledges transport only, never a completed workflow.
@@ -232,6 +278,11 @@ func (s *Store) receiveSynthetic(ctx context.Context, e stageEnvelope) (inboxRec
 	}
 	if old, err := queryInbox(ctx, tx, e.MessageID, e.PayloadSHA256); !errors.Is(err, sql.ErrNoRows) {
 		return old, err
+	}
+	if obsolete, err := unsentDisposition(ctx, tx, e); err != nil {
+		return inboxReceipt{}, err
+	} else if obsolete {
+		return inboxReceipt{}, errDeliveryObsolete
 	}
 	p, err := readDeliveryPolicy(ctx, tx, e.MessageID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -309,6 +360,15 @@ func (s *Store) acknowledgeSyntheticDelivery(ctx context.Context, r inboxReceipt
 	if actual != r {
 		return ErrResultConflict
 	}
+	e, err := readStageEnvelope(ctx, tx, r.MessageID)
+	if err != nil {
+		return err
+	}
+	if obsolete, err := unsentDisposition(ctx, tx, e); err != nil {
+		return err
+	} else if obsolete {
+		return ErrResultConflict
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO orchestration.workflow_synthetic_delivery_receipts(message_id,run_id,receipt_id,disposition) VALUES($1::uuid,$2::uuid,$3::uuid,$4) ON CONFLICT(message_id) DO NOTHING`, r.MessageID, r.RunID, r.ReceiptID, r.Disposition)
 	if err != nil {
 		return err
@@ -361,15 +421,61 @@ func (s *Store) dispatchSynthetic(ctx context.Context, id string, send func(cont
 	if err := tx.QueryRowContext(ctx, `SELECT state,run_version,policy_epoch,source_fingerprint_sha256 FROM orchestration.workflow_runs WHERE run_id=$1::uuid FOR UPDATE`, e.RunID).Scan(&state, &version, &epoch, &source); err != nil {
 		return inboxReceipt{}, err
 	}
+	// A receiver may have committed since the unlocked recovery lookup. Recheck
+	// under the common run lock before reasoning about absence of delivery.
+	if r, err := queryInbox(ctx, tx, id, e.PayloadSHA256); err == nil {
+		if err := tx.Rollback(); err != nil {
+			return inboxReceipt{}, err
+		}
+		return r, s.acknowledgeSyntheticDelivery(ctx, r)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return inboxReceipt{}, &resultUnknownError{err}
+	}
+	if obsolete, err := unsentDisposition(ctx, tx, e); err != nil {
+		return inboxReceipt{}, err
+	} else if obsolete {
+		return inboxReceipt{}, errDeliveryObsolete
+	}
+	var attempts int
+	var active, pristine bool
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,coalesce(lease_until>clock_timestamp(),false),
+        phase='READY' AND attempts=0 AND lease_epoch=0 AND lease_until IS NULL
+        FROM orchestration.workflow_synthetic_deliveries WHERE message_id=$1::uuid FOR UPDATE`, id).Scan(&attempts, &active, &pristine); err != nil {
+		return inboxReceipt{}, err
+	}
+	if version > e.RunVersion {
+		// Every supported send has an immutable attempt committed BEFORE transport.
+		// Zero mutable counters or a missing ACK alone can never establish unsent.
+		var unsent bool
+		if err := tx.QueryRowContext(ctx, `SELECT status='PENDING'
+            AND NOT EXISTS(SELECT 1 FROM orchestration.workflow_synthetic_delivery_attempts WHERE message_id=$1::uuid)
+            AND NOT EXISTS(SELECT 1 FROM orchestration.workflow_synthetic_delivery_receipts WHERE message_id=$1::uuid)
+            FROM orchestration.workflow_outbox WHERE message_id=$1::uuid`, id).Scan(&unsent); err != nil {
+			return inboxReceipt{}, err
+		}
+		if !pristine || !unsent {
+			return inboxReceipt{}, errDeliveryDeferred
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration.workflow_synthetic_sender_dispositions
+            (message_id,run_id,payload_sha256,intent_run_version,observed_prior_run_version,disposition)
+            VALUES($1::uuid,$2::uuid,$3,$4,$5,'NEVER_SENT_OBSOLETE')`, id, e.RunID, e.PayloadSHA256, e.RunVersion, version-1); err != nil {
+			return inboxReceipt{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE orchestration.workflow_synthetic_deliveries SET phase='OBSOLETE' WHERE message_id=$1::uuid`, id); err != nil {
+			return inboxReceipt{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE orchestration.workflow_outbox SET status='OBSOLETE' WHERE message_id=$1::uuid`, id); err != nil {
+			return inboxReceipt{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return inboxReceipt{}, s.reconcileUnsentDisposition(ctx, e)
+		}
+		return inboxReceipt{}, errDeliveryObsolete
+	}
 	if state != e.Stage || version != e.RunVersion || epoch != p.PolicyEpoch || source != p.SourceSHA256 {
 		return inboxReceipt{}, errDeliveryDeferred
 	}
 	if err := checkBoundedPolicy(ctx, tx, e.RunID, epoch); err != nil {
-		return inboxReceipt{}, err
-	}
-	var attempts int
-	var active bool
-	if err := tx.QueryRowContext(ctx, `SELECT attempts,coalesce(lease_until>clock_timestamp(),false) FROM orchestration.workflow_synthetic_deliveries WHERE message_id=$1::uuid FOR UPDATE`, id).Scan(&attempts, &active); err != nil {
 		return inboxReceipt{}, err
 	}
 	if active {

@@ -116,21 +116,32 @@ func (s *Store) reconcileBoundedAdmission(ctx context.Context, c Admission, p sy
 		return AdmissionReceipt{}, &resultUnknownError{err}
 	}
 	defer db.Close()
-	lookup := &Store{db: db}
 	hash, err := c.canonicalPayloadSHA256()
 	if err != nil {
 		return AdmissionReceipt{}, err
 	}
-	r, err := lookup.lookupConflict(ctx, c.CommandID, hash)
+	// Admission's duplicate-insert helper also maps absence to ErrConflict.
+	// Reconciliation must distinguish absence of proof from a proven mismatch.
+	var r AdmissionReceipt
+	var persistedHash string
+	err = db.QueryRowContext(ctx, `SELECT r.run_id::text,a.attempt_id::text,t.task_id::text,r.command_payload_sha256
+        FROM orchestration.workflow_runs r JOIN orchestration.stage_attempts a ON a.run_id=r.run_id
+          AND a.stage='INVESTIGATING' AND a.semantic_attempt_no=1
+        JOIN orchestration.task_deliveries t ON t.attempt_id=a.attempt_id
+        WHERE r.command_id=$1::uuid`, c.CommandID).Scan(&r.RunID, &r.AttemptID, &r.TaskID, &persistedHash)
+	if err == nil && persistedHash != hash {
+		return AdmissionReceipt{}, ErrConflict
+	}
 	if err == nil {
 		err = matchSyntheticProfile(ctx, db, r.RunID, p)
 	}
 	if err != nil {
-		if errors.Is(err, ErrResultConflict) {
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrResultConflict) {
 			return AdmissionReceipt{}, err
 		}
 		return AdmissionReceipt{}, &resultUnknownError{err}
 	}
+	r.Replayed = true
 	return r, nil
 }
 

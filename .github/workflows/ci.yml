@@ -34,6 +34,14 @@ jobs:
       - name: Build and test
         run: ./mvnw --batch-mode --no-transfer-progress clean verify
 
+      - name: Verify private Code Delivery ledger and fake GitLab
+        env:
+          ASEP_VN_T13_DISPOSABLE_DB: "true"
+        run: |
+          docker image inspect postgres:17-alpine >/dev/null 2>&1 || docker pull postgres:17-alpine
+          docker image inspect flyway/flyway:11 >/dev/null 2>&1 || docker pull flyway/flyway:11
+          bash scripts/ci_verify_delivery.sh
+
   frontend:
     name: Frontend (Node 24)
     runs-on: ubuntu-24.04

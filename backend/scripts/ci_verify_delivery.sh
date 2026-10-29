@@ -108,7 +108,7 @@ GRANT SELECT ON asep_delivery_test_proof.instance TO asep_delivery_runtime;
 SQL
 printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_delivery_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=code_delivery\nFLYWAY_DEFAULT_SCHEMA=code_delivery\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
   "$port" "$database" "$migration_password" > "$private_dir/flyway.env"
-phase='Java-owned V1-V3 migrations'
+phase='Java-owned V1-V4 migrations'
 for resource in flyway flyway_validate; do
   docker_cmd create --cidfile "$private_dir/$resource.cid" --label "$label=$run_id" \
     --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
@@ -118,16 +118,16 @@ for resource in flyway flyway_validate; do
   [[ "$(docker_cmd inspect --format '{{.State.ExitCode}}' "$cid")" == 0 ]]
 done
 history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c "SELECT string_agg(version,',' ORDER BY installed_rank) FROM code_delivery.flyway_schema_history WHERE success")"
-[[ "$history" == 1,2,3 ]]
-echo "VN-T13 V1-V3 migrate + repeat/validate PASS (run $run_id)"
+[[ "$history" == 1,2,3,4 ]]
+echo "VN-T13/VN-T14 V1-V4 migrate + repeat/validate PASS (run $run_id)"
 export ASEP_DELIVERY_DISPOSABLE=true ASEP_DELIVERY_DB_USER=asep_delivery_runtime
 export ASEP_DELIVERY_JDBC_URL="jdbc:postgresql://127.0.0.1:$port/$database"
 export ASEP_DELIVERY_DB_PASSWORD="$runtime_password" ASEP_DELIVERY_NONCE="$nonce"
 maven_options=(--batch-mode --no-transfer-progress)
 if [[ "${ASEP_VN_T13_MAVEN_OFFLINE:-false}" == true ]]; then maven_options+=(--offline); fi
-phase='durable fake GitLab RF-12..RF-16 tests'
+phase='VN-T13 fake delivery + VN-T14 ledger, synthetic recovery and coordinator tests'
 run_bounded 180 ./mvnw "${maven_options[@]}" -Dasep.delivery.postgres=true \
-  -Dtest=CodeDeliveryContractTest,CodeDeliveryPostgresTest test
+  -Dtest=CodeDeliveryContractTest,CodeDeliveryPostgresTest,TestProjectDeliverySchemaPostgresTest,TestProjectDeliveryLedgerPostgresTest,TestProjectSyntheticFlowPostgresTest,TestProjectDeliveryCoordinatorPostgresTest test
 phase='test discovery and skip audit'
 python3 - <<'PY'
 from pathlib import Path
@@ -137,6 +137,26 @@ r=ET.parse(p).getroot()
 assert int(r.get('tests','0')) >= 40
 assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
 print('VN-T13 PostgreSQL discovery/no-skip PASS:',r.get('tests'),'executed tests')
+p=Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.TestProjectDeliverySchemaPostgresTest.xml')
+r=ET.parse(p).getroot()
+assert int(r.get('tests','0')) >= 8
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('VN-T14 schema/ACL discovery/no-skip PASS:',r.get('tests'),'executed tests')
+p=Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.TestProjectDeliveryLedgerPostgresTest.xml')
+r=ET.parse(p).getroot()
+assert int(r.get('tests','0')) >= 10
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('VN-T14 durable ledger discovery/no-skip PASS:',r.get('tests'),'executed tests')
+p=Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.TestProjectSyntheticFlowPostgresTest.xml')
+r=ET.parse(p).getroot()
+assert int(r.get('tests','0')) >= 12
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('VN-T14 synthetic fault-flow discovery/no-skip PASS:',r.get('tests'),'executed tests')
+p=Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.TestProjectDeliveryCoordinatorPostgresTest.xml')
+r=ET.parse(p).getroot()
+assert int(r.get('tests','0')) >= 18
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('VN-T14 coordinator discovery/no-skip PASS:',r.get('tests'),'executed tests')
 PY
 phase='repeated concurrent replay'
 for repetition in {1..5}; do
@@ -150,4 +170,16 @@ assert int(r.get('tests','0'))==1 and all(int(r.get(k,'0'))==0 for k in ('errors
 print('VN-T13 concurrent replay repetition',sys.argv[1],'PASS')
 PY
 done
-echo 'VN-T13 private ledger/fake GitLab verification PASS; live delivery/authentication not exercised'
+phase='VN-T14 concurrent send-claim CAS replay'
+for repetition in {1..3}; do
+  run_bounded 90 ./mvnw "${maven_options[@]}" -Dasep.delivery.postgres=true \
+    '-Dtest=TestProjectDeliveryLedgerPostgresTest#concurrentClaimersHaveExactlyOneDurableWinnerAndOneCallbackRevision' test > "$private_dir/vn-t14-cas-$repetition.log" 2>&1
+  python3 - "$repetition" <<'PY'
+from pathlib import Path
+import sys,xml.etree.ElementTree as ET
+r=ET.parse(Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.TestProjectDeliveryLedgerPostgresTest.xml')).getroot()
+assert int(r.get('tests','0'))==1 and all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('VN-T14 concurrent CAS repetition',sys.argv[1],'PASS')
+PY
+done
+echo 'VN-T13 fake delivery + VN-T14 durable ledger/ACL, synthetic fault-flow and coordinator verification PASS; NO live GitLab transport or calls'

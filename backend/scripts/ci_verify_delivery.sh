@@ -132,6 +132,7 @@ run_bounded 180 ./mvnw "${maven_options[@]}" -Dasep.delivery.postgres=true \
   -Dtest=CodeDeliveryContractTest,CodeDeliveryPostgresTest,TestProjectDeliverySchemaPostgresTest,TestProjectDeliveryLedgerPostgresTest,TestProjectSyntheticFlowPostgresTest,TestProjectDeliveryCoordinatorPostgresTest,OwnerGrantSchemaPostgresTest test
 phase='issuer-only owner grant integration tests'
 ASEP_DELIVERY_TEST_ISSUER_PASSWORD="$issuer_password" \
+ASEP_DELIVERY_TEST_MIGRATION_PASSWORD="$migration_password" \
   run_bounded 180 ./mvnw "${maven_options[@]}" \
     -Dasep.delivery.postgres=true \
     -Dtest=OwnerGrantAuthorityPostgresTest test
@@ -148,12 +149,12 @@ path = Path(
 )
 
 root = ET.parse(path).getroot()
-assert int(root.get('tests', '0')) == 8
+assert int(root.get('tests', '0')) == 14
 assert all(
     int(root.get(key, '0')) == 0
     for key in ('errors', 'failures', 'skipped')
 )
-print('Owner grant issuer/revocation/audit/JDBC source: 8/8 PASS')
+print('Owner grant issuer/revocation/audit/JDBC source: 14/14 PASS')
 PYAUDIT
 
 phase='test discovery and skip audit'

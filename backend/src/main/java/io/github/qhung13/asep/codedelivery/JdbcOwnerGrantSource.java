@@ -82,7 +82,7 @@ public final class JdbcOwnerGrantSource
 
         } catch (SQLException unavailable) {
             throw new IllegalStateException(
-                    "Owner Grant store unavailable", unavailable);
+                    "Owner Grant store unavailable");
         }
     }
 }

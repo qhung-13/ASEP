@@ -122,6 +122,45 @@ class TestProjectDeliveryGateTest {
                 () -> actualGate.requireBeforeMutation(request, fresh()));
     }
 
+    @Test
+    void validCurrentPolicyAloneNeverUnlocksMutation() {
+        var verifier = new TestProjectCurrentPolicyVerifier(
+                (run, attempt) ->
+                    new TestProjectCurrentPolicyVerifier.Snapshot(
+                        request.runId(),
+                        request.attemptId(),
+                        request.runVersion(),
+                        "DELIVERY_PENDING",
+                        request.policyId(),
+                        request.policyEpoch(),
+                        request.projectId(),
+                        request.targetBranch(),
+                        request.baseSha(),
+                        request.expectedTargetSha(),
+                        true,
+                        NOW),
+                CLOCK,
+                Duration.ofSeconds(30));
+
+        var actualGate = gate(verifier);
+        var decision = actualGate.evaluate(request, fresh());
+
+        assertTrue(decision.blocked());
+        assertFalse(decision.missing().contains(
+                Requirement.CURRENT_POLICY));
+
+        assertTrue(decision.missing().contains(
+                Requirement.OWNER_WRITE_AUTHORIZATION));
+        assertTrue(decision.missing().contains(
+                Requirement.SAFE_CI_AND_INHERITED_SETTINGS));
+        assertTrue(decision.missing().contains(
+                Requirement.TRUSTED_LIVE_EXECUTOR_WIRING));
+
+        assertThrows(DeliveryException.class,
+                () -> actualGate.requireBeforeMutation(
+                        request, fresh()));
+    }
+
     @Test void fullyBoundFixtureCanOnlySatisfyLocalValidationWithoutAnyRemoteCapability() {
         assertFalse(gate((r, facts) -> all()).evaluate(request, fresh()).blocked());
         assertEquals(0, TestProjectDeliveryGate.class.getAnnotations().length);

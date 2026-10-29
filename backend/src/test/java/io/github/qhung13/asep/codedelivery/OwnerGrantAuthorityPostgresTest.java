@@ -240,9 +240,8 @@ class OwnerGrantAuthorityPostgresTest {
                 )
         );
 
-        assertThrows(
-                IllegalStateException.class,
-                () -> unavailable.find(UUID.randomUUID()));
+        var failure=assertThrows(IllegalStateException.class, () -> unavailable.find(UUID.randomUUID()));
+        assertNull(failure.getCause());
     }
 
 
@@ -288,7 +287,7 @@ class OwnerGrantAuthorityPostgresTest {
             try (var rows = stmt.executeQuery()) {
                 assertTrue(rows.next());
                 assertEquals(PROJECT_ID, rows.getLong(1));
-                assertEquals("test-operator", rows.getString(2));
+                assertEquals("asep_delivery_issuer", rows.getString(2));
                 assertTrue(rows.getBoolean(3));
                 assertFalse(rows.next());
             }
@@ -304,7 +303,7 @@ class OwnerGrantAuthorityPostgresTest {
             try (var rows = stmt.executeQuery()) {
                 assertTrue(rows.next());
                 assertEquals("ISSUED", rows.getString(1));
-                assertEquals("test-operator", rows.getString(2));
+                assertEquals("asep_delivery_issuer", rows.getString(2));
                 assertFalse(rows.next());
             }
         }
@@ -327,7 +326,7 @@ class OwnerGrantAuthorityPostgresTest {
             try (var rows = stmt.executeQuery()) {
                 assertTrue(rows.next());
                 assertTrue(rows.getBoolean(1));
-                assertEquals("test-operator", rows.getString(2));
+                assertEquals("asep_delivery_issuer", rows.getString(2));
             }
         }
 
@@ -487,6 +486,72 @@ class OwnerGrantAuthorityPostgresTest {
     @Test void issuerCannotEscalateToMigrationOrWriteGoDomain() throws Exception {
         for (String command : java.util.List.of("SET ROLE asep_delivery_migrator", "SELECT * FROM orchestration.delivery_owner_guard", "INSERT INTO orchestration.delivery_owner_guard VALUES(1)")) {
             sqlState("42501", () -> { try (var db = issuer.getConnection(); var stmt = db.createStatement()) { stmt.execute(command); } });
+        }
+    }
+
+    private TestProjectDeliveryRequest exactRequest() {
+        return new TestProjectDeliveryRequest(UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),1,UUID.randomUUID(),"restricted-operator-test",1,
+                "a".repeat(40),"a".repeat(40),"b".repeat(40),"c".repeat(40),"d".repeat(64),UUID.randomUUID(),UUID.randomUUID(),"e".repeat(64),"f".repeat(64));
+    }
+    @Test void restrictedAuthorityIssuesExactGrantFromAuthenticatedDatabasePrincipal() throws Exception {
+        var request=exactRequest();var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");
+        var receipt=authority.approve(request,300);
+        assertEquals(request.ownerGrantId(),receipt.grantId());assertEquals(request.bodyHash(),receipt.requestHash());
+        assertEquals("asep_delivery_issuer",receipt.actor());assertEquals(1,auditCount(receipt.grantId()));
+        var verifier=new TestProjectOwnerGrantVerifier(new JdbcOwnerGrantSource(runtime),java.time.Clock.systemUTC());
+        assertEquals(java.util.Set.of(TestProjectDeliveryGate.Requirement.OWNER_WRITE_AUTHORIZATION),verifier.verify(request,null).verified());
+    }
+    @Test void approvalReplayReturnsOriginalGrantWithoutExpiryExtensionOrAuditDuplication() throws Exception {
+        var request=exactRequest();var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");
+        var first=authority.approve(request,60);var replay=authority.approve(request,3600);
+        assertEquals(first,replay);assertEquals(1,auditCount(request.ownerGrantId()));
+    }
+    @Test void authorityRevocationIsIdempotentButNeverRestoresTheGrant() throws Exception {
+        var request=exactRequest();var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");
+        authority.approve(request,300);var revoked=authority.revoke(request);
+        assertNotNull(revoked.revokedAt());assertEquals(revoked,authority.revoke(request));
+        assertEquals(2,auditCount(request.ownerGrantId()));
+        assertThrows(DeliveryException.class,()->authority.approve(request,300));
+        assertTrue(new JdbcOwnerGrantSource(runtime).find(request.ownerGrantId()).revoked());
+    }
+    @Test void changedRequestCannotReuseAnApprovedOperation() throws Exception {
+        var request=exactRequest();var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");authority.approve(request,300);
+        var other=new TestProjectDeliveryRequest(request.operationId(),request.runId(),request.attemptId(),2,request.ownerGrantId(),request.policyId(),request.policyEpoch(),
+                request.baseSha(),request.expectedTargetSha(),request.candidateCommitSha(),request.candidateTreeSha(),request.manifestSha256(),request.sealReceiptId(),request.verificationReceiptId(),request.verifierProfileSha256(),request.safeCiProfileSha256());
+        assertThrows(DeliveryException.class,()->authority.approve(other,300));assertEquals(1,auditCount(request.ownerGrantId()));
+    }
+    @Test void restrictedAuthorityRejectsWrongPrincipalRuntimeAndInvalidTtlBeforeIssuance() throws Exception {
+        var request=exactRequest();
+        assertThrows(DeliveryException.class,()->new OwnerGrantAuthority(runtime,"asep_delivery_runtime"));
+        assertThrows(DeliveryException.class,()->new OwnerGrantAuthority(issuer,"untrusted_actor").approve(request,300));
+        var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");
+        assertThrows(DeliveryException.class,()->authority.approve(request,0));assertThrows(DeliveryException.class,()->authority.approve(request,3601));
+        assertNull(new JdbcOwnerGrantSource(runtime).find(request.ownerGrantId()));
+    }
+    @Test void expiredApprovalCannotBeRenewedByAnExactReplay() throws Exception {
+        var request=exactRequest();var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");var first=authority.approve(request,1);
+        try(var db=issuer.getConnection();var stmt=db.prepareStatement("SELECT pg_sleep(GREATEST(0,extract(epoch FROM (?::timestamptz-clock_timestamp())))+0.02)")) {
+            stmt.setTimestamp(1,java.sql.Timestamp.from(first.expiresAt()));stmt.execute();
+        }
+        assertThrows(DeliveryException.class,()->authority.approve(request,300));
+        assertEquals(first.expiresAt(),new JdbcOwnerGrantSource(runtime).find(request.ownerGrantId()).expiresAt());assertEquals(1,auditCount(request.ownerGrantId()));
+    }
+    @Test void restrictedAuthorityRollsBackWhenItsAuditAppendFails() throws Exception {
+        var request=exactRequest();var authority=new OwnerGrantAuthority(issuer,"asep_delivery_issuer");
+        failAudit(request.ownerGrantId(),"ISSUED",()->assertThrows(DeliveryException.class,()->authority.approve(request,300)));
+        assertNull(new JdbcOwnerGrantSource(runtime).find(request.ownerGrantId()));
+        authority.approve(request,300);
+        failAudit(request.ownerGrantId(),"REVOKED",()->assertThrows(DeliveryException.class,()->authority.revoke(request)));
+        assertFalse(new JdbcOwnerGrantSource(runtime).find(request.ownerGrantId()).revoked());assertEquals(1,auditCount(request.ownerGrantId()));
+    }
+    @Test void arbitraryIssuerLabelCannotOverrideAuthenticatedAuditActor() throws Exception {
+        UUID grant=issue(issuer,PROJECT_ID,null);
+        try(var db=issuer.getConnection();var stmt=db.prepareStatement("SELECT issued_by FROM code_delivery.owner_grants WHERE grant_id=?")) {
+            stmt.setObject(1,grant);try(var rows=stmt.executeQuery()) { assertTrue(rows.next());assertEquals("asep_delivery_issuer",rows.getString(1)); }
+        }
+        revoke(issuer,grant);
+        try(var db=issuer.getConnection();var stmt=db.prepareStatement("SELECT actor_id FROM code_delivery.owner_grant_events WHERE grant_id=?")) {
+            stmt.setObject(1,grant);try(var rows=stmt.executeQuery()) { int count=0;while(rows.next()) { assertEquals("asep_delivery_issuer",rows.getString(1));count++; }assertEquals(2,count); }
         }
     }
 

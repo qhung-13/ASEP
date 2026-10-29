@@ -110,7 +110,7 @@ GRANT SELECT ON asep_delivery_test_proof.instance TO asep_delivery_runtime;
 SQL
 printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_delivery_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=code_delivery\nFLYWAY_DEFAULT_SCHEMA=code_delivery\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
   "$port" "$database" "$migration_password" > "$private_dir/flyway.env"
-phase='Java-owned V1-V5 migrations'
+phase='Java-owned V1-V6 migrations'
 for resource in flyway flyway_validate; do
   docker_cmd create --cidfile "$private_dir/$resource.cid" --label "$label=$run_id" \
     --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
@@ -120,8 +120,8 @@ for resource in flyway flyway_validate; do
   [[ "$(docker_cmd inspect --format '{{.State.ExitCode}}' "$cid")" == 0 ]]
 done
 history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c "SELECT string_agg(version,',' ORDER BY installed_rank) FROM code_delivery.flyway_schema_history WHERE success")"
-[[ "$history" == 1,2,3,4,5 ]]
-echo "VN-T13/VN-T14 V1-V5 migrate + repeat/validate PASS (run $run_id)"
+[[ "$history" == 1,2,3,4,5,6 ]]
+echo "VN-T13/VN-T14 V1-V6 migrate + repeat/validate PASS (run $run_id)"
 export ASEP_DELIVERY_DISPOSABLE=true ASEP_DELIVERY_DB_USER=asep_delivery_runtime
 export ASEP_DELIVERY_JDBC_URL="jdbc:postgresql://127.0.0.1:$port/$database"
 export ASEP_DELIVERY_DB_PASSWORD="$runtime_password" ASEP_DELIVERY_NONCE="$nonce"
@@ -149,12 +149,12 @@ path = Path(
 )
 
 root = ET.parse(path).getroot()
-assert int(root.get('tests', '0')) == 14
+assert int(root.get('tests', '0')) == 22
 assert all(
     int(root.get(key, '0')) == 0
     for key in ('errors', 'failures', 'skipped')
 )
-print('Owner grant issuer/revocation/audit/JDBC source: 14/14 PASS')
+print('Owner grant issuer/revocation/audit/JDBC source: 22/22 PASS')
 PYAUDIT
 
 phase='test discovery and skip audit'

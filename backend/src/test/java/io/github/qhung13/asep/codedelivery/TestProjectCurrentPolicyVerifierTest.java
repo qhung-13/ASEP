@@ -33,6 +33,12 @@ class TestProjectCurrentPolicyVerifierTest {
                     "d".repeat(64), id(5), id(6),
                     "e".repeat(64), "f".repeat(64));
 
+    @Test void sharedGoRequestCodecHasExactCandidateBinding() {
+        var golden=new TestProjectDeliveryRequest(id(1),id(2),id(3),9,id(4),"local-fixture",1,
+                "a".repeat(40),"a".repeat(40),"b".repeat(40),"c".repeat(40),"d".repeat(64),id(5),id(6),"e".repeat(64),"f".repeat(64));
+        assertEquals("679f2b93f889c6e966afa4c721fe9fd468c0d6533bdd542462266ee399ffdea6",golden.bodyHash());
+    }
+
     private TestProjectCurrentPolicyVerifier.Snapshot approved() {
         return new TestProjectCurrentPolicyVerifier.Snapshot(
                 request.runId(),
@@ -46,7 +52,7 @@ class TestProjectCurrentPolicyVerifierTest {
                 request.baseSha(),
                 request.expectedTargetSha(),
                 true,
-                NOW);
+                NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30));
     }
 
     private TestProjectCurrentPolicyVerifier verifier(
@@ -82,7 +88,7 @@ class TestProjectCurrentPolicyVerifierTest {
             "cancel-requested", "cancelled", "investigating",
             "policy-id", "policy-epoch", "project",
             "target-branch", "base", "target-head",
-            "policy-disabled", "stale", "future"
+            "policy-disabled", "stale", "future", "operation", "candidate-hash", "expired", "missing-expiry"
     })
     void mismatchedOrUnsafeSnapshotIsNeverAuthority(String fault) {
         var s = approved();
@@ -107,7 +113,9 @@ class TestProjectCurrentPolicyVerifierTest {
                         !fault.equals("policy-disabled"),
                         fault.equals("stale") ? NOW.minusSeconds(31)
                                 : fault.equals("future") ? NOW.plusSeconds(1)
-                                : NOW);
+                                : NOW, fault.equals("operation") ? id(99) : request.operationId(),
+                        fault.equals("candidate-hash") ? "0".repeat(64) : request.bodyHash(),
+                        fault.equals("missing-expiry") ? null : fault.equals("expired") ? NOW : NOW.plusSeconds(30));
 
         Evidence evidence = verifier(new AtomicReference<>(changed))
                 .verify(request, null);
@@ -129,7 +137,7 @@ class TestProjectCurrentPolicyVerifierTest {
                 s.runId(), s.attemptId(), s.runVersion() + 1,
                 "CANCEL_REQUESTED", s.policyId(), s.policyEpoch(),
                 s.projectId(), s.targetBranch(), s.baseSha(),
-                s.targetHeadSha(), false, NOW));
+                s.targetHeadSha(), false, NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30)));
 
         assertTrue(verifier.verify(request, null).verified().isEmpty());
     }
@@ -142,7 +150,7 @@ class TestProjectCurrentPolicyVerifierTest {
                 state, s.policyId(), s.policyEpoch(),
                 s.projectId(), s.targetBranch(),
                 s.baseSha(), s.targetHeadSha(),
-                policyApproved, observedAt);
+                policyApproved, observedAt, request.operationId(), request.bodyHash(), NOW.plusSeconds(30));
     }
 
     @ParameterizedTest

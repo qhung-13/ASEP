@@ -11,8 +11,8 @@ import java.util.UUID;
 import static io.github.qhung13.asep.codedelivery.TestProjectDeliveryGate.*;
 
 /**
- * VN-T14 local-only workflow/policy verifier.
- * No Go HTTP adapter, DB reader, Spring wiring or live authority exists here.
+ * Verifies current independently loaded workflow authority; deployment and transport
+ * authentication must be established by its protected source, never request fields.
  */
 public final class TestProjectCurrentPolicyVerifier implements TrustedEvidenceVerifier {
 
@@ -36,7 +36,10 @@ public final class TestProjectCurrentPolicyVerifier implements TrustedEvidenceVe
             String baseSha,
             String targetHeadSha,
             boolean deliveryPolicyApproved,
-            Instant observedAt) {}
+            Instant observedAt,
+            UUID operationId,
+            String authorizedRequestHash,
+            Instant validUntil) {}
 
     private final AuthoritySource source;
     private final Clock clock;
@@ -72,17 +75,20 @@ public final class TestProjectCurrentPolicyVerifier implements TrustedEvidenceVe
             Instant observedAt = snapshot.observedAt();
 
             // Reject missing, future or stale observations.
-            if (observedAt == null
+            if (snapshot.validUntil() == null || !snapshot.validUntil().isAfter(now)
+                    || observedAt == null
                     || observedAt.isAfter(now)
                     || Duration.between(observedAt, now)
                             .compareTo(maximumAge) > 0) {
                 return denied();
             }
 
-            // DELIVERY_PENDING is a local test-profile candidate,
-            // not an approved production transition.
+            // Exact operation/candidate binding prevents reuse of one run-version
+            // authorization for a different candidate or evidence tuple.
             boolean exactIdentity =
-                    request.runId().equals(snapshot.runId())
+                    request.operationId().equals(snapshot.operationId())
+                    && request.bodyHash().equals(snapshot.authorizedRequestHash())
+                    && request.runId().equals(snapshot.runId())
                     && request.attemptId().equals(snapshot.attemptId())
                     && request.runVersion() == snapshot.runVersion()
                     && "DELIVERY_PENDING".equals(snapshot.state());

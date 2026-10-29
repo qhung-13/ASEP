@@ -69,7 +69,7 @@ class TestProjectTrustedEvidenceCompositeTest {
                 request.baseSha(),
                 request.expectedTargetSha(),
                 true,
-                NOW);
+                NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30));
     }
 
     private TestProjectTrustedEvidenceComposite composite(
@@ -181,7 +181,7 @@ class TestProjectTrustedEvidenceCompositeTest {
                                 s.policyId(), s.policyEpoch(),
                                 s.projectId(), s.targetBranch(),
                                 s.baseSha(), s.targetHeadSha(),
-                                false, NOW));
+                                false, NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30)));
             }
             default -> fail("Unexpected test fault");
         }
@@ -258,7 +258,7 @@ class TestProjectTrustedEvidenceCompositeTest {
                 s.state(), s.policyId(), s.policyEpoch(),
                 s.projectId(), s.targetBranch(),
                 s.baseSha(), s.targetHeadSha(),
-                false, NOW));
+                false, NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30)));
 
         denied(verifier.verify(request, freshInspection()));
     }
@@ -290,7 +290,7 @@ class TestProjectTrustedEvidenceCompositeTest {
                 s.policyId(), s.policyEpoch(),
                 s.projectId(), s.targetBranch(),
                 s.baseSha(), s.targetHeadSha(),
-                false, NOW));
+                false, NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30)));
 
         var after = gate.evaluate(request, freshInspection());
 

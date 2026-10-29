@@ -17,7 +17,7 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10|manual-admission) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10|manual-admission|delivery-authority) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 # The cross-component fixture is required in full and manual-admission runs.
 # Other focused VN-T11 modes keep their existing toolchain requirements.
 if [[ "$mode" == all || "$mode" == manual-admission ]]; then
@@ -50,7 +50,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
+  for resource in flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -118,7 +118,7 @@ python3 - "$private_dir" <<'PY'
 import os, secrets, sys
 from pathlib import Path
 p = Path(sys.argv[1])
-for name in ('admin', 'migrator', 'runtime', 'probe'):
+for name in ('admin', 'migrator', 'runtime', 'probe', 'authority'):
     (p / name).write_text(secrets.token_hex(32) + '\n')
 (p / 'token').write_text(secrets.token_hex(32) + '\n')
 for f in p.iterdir():
@@ -128,6 +128,7 @@ read -r admin_password < "$private_dir/admin"
 read -r migrator_password < "$private_dir/migrator"
 read -r runtime_password < "$private_dir/runtime"
 read -r probe_password < "$private_dir/probe"
+read -r authority_password < "$private_dir/authority"
 printf 'POSTGRES_USER=postgres\nPOSTGRES_DB=%s\nPOSTGRES_PASSWORD=%s\n' "$database" "$admin_password" > "$private_dir/postgres.env"
 
 phase='disposable PostgreSQL creation'
@@ -157,6 +158,7 @@ docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -q -U postgres -d "
 CREATE ROLE asep_orch_migrator LOGIN PASSWORD '${migrator_password}';
 CREATE ROLE asep_orch_runtime LOGIN PASSWORD '${runtime_password}';
 CREATE ROLE asep_orch_probe LOGIN PASSWORD '${probe_password}';
+CREATE ROLE asep_orch_authority LOGIN PASSWORD '${authority_password}';
 CREATE SCHEMA orchestration AUTHORIZATION asep_orch_migrator;
 REVOKE ALL ON SCHEMA orchestration FROM PUBLIC;
 CREATE SCHEMA asep_test_harness AUTHORIZATION postgres;
@@ -416,6 +418,40 @@ disposition_count="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d 
 [[ "$disposition_count" == 0 ]] || fail
 echo 'A01 populated V9 -> V10 compatibility PASS: all original facts unchanged; no invented unsent disposition or receiver acknowledgement'
 
+phase='Go-owned delivery authority V11 migration'
+docker_cmd create --cidfile "$private_dir/flyway_v11.cid" \
+  --label "$owner_label=$run_id" --network host --env-file "$private_dir/flyway.env" \
+  -v "$PWD/db/migrations:/flyway/sql:ro" flyway/flyway:11 -target=11 migrate >"$private_dir/flyway-v11-create.log" 2>&1
+flyway_v11_id="$(cat "$private_dir/flyway_v11.cid")"
+docker_cmd start "$flyway_v11_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v11_id" > "$private_dir/flyway-v11-exit"
+[[ "$(cat "$private_dir/flyway-v11-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+  "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7,8,9,10,11' ]] || fail
+v11_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v9-snapshot.sql")"
+[[ "$v9_before" == "$v11_after" ]] || fail
+echo 'V11 delivery authority migration PASS; populated V1-V10 facts preserved'
+phase='protected delivery authority PostgreSQL regression'
+# Only this dedicated group receives owned-fixture authority/migration passwords.
+# Never export these to legacy worker/agent child-process fixtures.
+if ! ASEP_DELIVERY_AUTHORITY_TEST_PASSWORD="$authority_password" \
+ASEP_DELIVERY_MIGRATOR_TEST_PASSWORD="$migrator_password" \
+run_bounded 180 go test -race -count=1 -tags=integration,deliveryauthority -timeout=120s -v \
+  -run '^TestDeliveryAuthority' ./internal/workflow > "$private_dir/delivery-authority.log" 2>&1; then
+  cat "$private_dir/delivery-authority.log"
+  fail
+fi
+cat "$private_dir/delivery-authority.log"
+if grep -q -- '--- SKIP:' "$private_dir/delivery-authority.log"; then fail; fi
+[[ "$(grep -c '^--- PASS: TestDeliveryAuthority' "$private_dir/delivery-authority.log")" == 9 ]] || fail
+if [[ "$mode" == delivery-authority ]]; then
+  run_bounded 120 go vet ./...
+  run_bounded 120 go test -race -count=1 -timeout=90s ./...
+  echo 'Owned delivery authority fixture PASS; no live controller, PKI or GitLab operation'
+  exit 0
+fi
+
 phase='Go vet and unit regressions'
 run_bounded 120 go vet -tags=integration,postgresrestart ./...
 run_bounded 120 go test -race -count=1 -timeout=90s ./...
@@ -667,4 +703,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11 disposable verification PASS: proof guard, V1-V10, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'
+echo 'VN-T11/VN-T14 disposable verification PASS: proof guard, V1-V11, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'

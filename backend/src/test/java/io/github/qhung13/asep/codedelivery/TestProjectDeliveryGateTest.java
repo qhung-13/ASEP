@@ -138,7 +138,7 @@ class TestProjectDeliveryGateTest {
                         request.baseSha(),
                         request.expectedTargetSha(),
                         true,
-                        NOW),
+                        NOW, request.operationId(), request.bodyHash(), NOW.plusSeconds(30)),
                 CLOCK,
                 Duration.ofSeconds(30));
 

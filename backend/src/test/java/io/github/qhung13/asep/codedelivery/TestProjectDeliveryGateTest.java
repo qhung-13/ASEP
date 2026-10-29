@@ -94,6 +94,34 @@ class TestProjectDeliveryGateTest {
         assertTrue(gate.evaluate(request, null).blocked()); assertTrue(gate.evaluate(null, null).blocked());
         assertThrows(NoSuchMethodException.class, () -> TestProjectDeliveryGate.class.getMethod("evaluate", DeliveryIntent.class, Inspection.class));
     }
+    @Test
+    void validOwnerGrantAloneNeverUnlocksMutation() {
+        var verifier = new TestProjectOwnerGrantVerifier(
+                id -> new TestProjectOwnerGrantVerifier.GrantRecord(
+                        grant(),
+                        NOW.minusSeconds(10),
+                        NOW.plusSeconds(30),
+                        false),
+                CLOCK);
+
+        var actualGate = gate(verifier);
+        var decision = actualGate.evaluate(request, fresh());
+
+        assertTrue(decision.blocked());
+        assertFalse(decision.missing().contains(
+                Requirement.OWNER_WRITE_AUTHORIZATION));
+
+        assertTrue(decision.missing().contains(
+                Requirement.CURRENT_POLICY));
+        assertTrue(decision.missing().contains(
+                Requirement.SAFE_CI_AND_INHERITED_SETTINGS));
+        assertTrue(decision.missing().contains(
+                Requirement.TRUSTED_LIVE_EXECUTOR_WIRING));
+
+        assertThrows(DeliveryException.class,
+                () -> actualGate.requireBeforeMutation(request, fresh()));
+    }
+
     @Test void fullyBoundFixtureCanOnlySatisfyLocalValidationWithoutAnyRemoteCapability() {
         assertFalse(gate((r, facts) -> all()).evaluate(request, fresh()).blocked());
         assertEquals(0, TestProjectDeliveryGate.class.getAnnotations().length);

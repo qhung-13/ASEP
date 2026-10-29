@@ -68,12 +68,13 @@ python3 - "$private_dir" <<'PY'
 from pathlib import Path
 import secrets,sys
 p=Path(sys.argv[1])
-for name in ('admin','migration','runtime','nonce'):
+for name in ('admin','migration','runtime','issuer','nonce'):
     (p/name).write_text(secrets.token_hex(32)+'\n')
 PY
 read -r admin_password < "$private_dir/admin"
 read -r migration_password < "$private_dir/migration"
 read -r runtime_password < "$private_dir/runtime"
+read -r issuer_password < "$private_dir/issuer"
 read -r nonce < "$private_dir/nonce"
 printf 'POSTGRES_USER=postgres\nPOSTGRES_DB=%s\nPOSTGRES_PASSWORD=%s\n' "$database" "$admin_password" > "$private_dir/postgres.env"
 phase='owned disposable PostgreSQL'
@@ -94,6 +95,7 @@ phase='least privilege roles and read-only instance proof'
 docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -q -U postgres -d "$database" > "$private_dir/provision.log" 2>&1 <<SQL
 CREATE ROLE asep_delivery_migrator LOGIN PASSWORD '${migration_password}';
 CREATE ROLE asep_delivery_runtime LOGIN PASSWORD '${runtime_password}';
+CREATE ROLE asep_delivery_issuer LOGIN PASSWORD '${issuer_password}';
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 CREATE SCHEMA code_delivery AUTHORIZATION asep_delivery_migrator;
 CREATE SCHEMA orchestration AUTHORIZATION postgres;
@@ -108,7 +110,7 @@ GRANT SELECT ON asep_delivery_test_proof.instance TO asep_delivery_runtime;
 SQL
 printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_delivery_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=code_delivery\nFLYWAY_DEFAULT_SCHEMA=code_delivery\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
   "$port" "$database" "$migration_password" > "$private_dir/flyway.env"
-phase='Java-owned V1-V4 migrations'
+phase='Java-owned V1-V5 migrations'
 for resource in flyway flyway_validate; do
   docker_cmd create --cidfile "$private_dir/$resource.cid" --label "$label=$run_id" \
     --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
@@ -118,8 +120,8 @@ for resource in flyway flyway_validate; do
   [[ "$(docker_cmd inspect --format '{{.State.ExitCode}}' "$cid")" == 0 ]]
 done
 history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c "SELECT string_agg(version,',' ORDER BY installed_rank) FROM code_delivery.flyway_schema_history WHERE success")"
-[[ "$history" == 1,2,3,4 ]]
-echo "VN-T13/VN-T14 V1-V4 migrate + repeat/validate PASS (run $run_id)"
+[[ "$history" == 1,2,3,4,5 ]]
+echo "VN-T13/VN-T14 V1-V5 migrate + repeat/validate PASS (run $run_id)"
 export ASEP_DELIVERY_DISPOSABLE=true ASEP_DELIVERY_DB_USER=asep_delivery_runtime
 export ASEP_DELIVERY_JDBC_URL="jdbc:postgresql://127.0.0.1:$port/$database"
 export ASEP_DELIVERY_DB_PASSWORD="$runtime_password" ASEP_DELIVERY_NONCE="$nonce"
@@ -127,7 +129,33 @@ maven_options=(--batch-mode --no-transfer-progress)
 if [[ "${ASEP_VN_T13_MAVEN_OFFLINE:-false}" == true ]]; then maven_options+=(--offline); fi
 phase='VN-T13 fake delivery + VN-T14 ledger, synthetic recovery and coordinator tests'
 run_bounded 180 ./mvnw "${maven_options[@]}" -Dasep.delivery.postgres=true \
-  -Dtest=CodeDeliveryContractTest,CodeDeliveryPostgresTest,TestProjectDeliverySchemaPostgresTest,TestProjectDeliveryLedgerPostgresTest,TestProjectSyntheticFlowPostgresTest,TestProjectDeliveryCoordinatorPostgresTest test
+  -Dtest=CodeDeliveryContractTest,CodeDeliveryPostgresTest,TestProjectDeliverySchemaPostgresTest,TestProjectDeliveryLedgerPostgresTest,TestProjectSyntheticFlowPostgresTest,TestProjectDeliveryCoordinatorPostgresTest,OwnerGrantSchemaPostgresTest test
+phase='issuer-only owner grant integration tests'
+ASEP_DELIVERY_TEST_ISSUER_PASSWORD="$issuer_password" \
+  run_bounded 180 ./mvnw "${maven_options[@]}" \
+    -Dasep.delivery.postgres=true \
+    -Dtest=OwnerGrantAuthorityPostgresTest test
+
+phase='issuer integration test discovery audit'
+python3 - <<'PYAUDIT'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+path = Path(
+    'target/surefire-reports/'
+    'TEST-io.github.qhung13.asep.codedelivery.'
+    'OwnerGrantAuthorityPostgresTest.xml'
+)
+
+root = ET.parse(path).getroot()
+assert int(root.get('tests', '0')) == 8
+assert all(
+    int(root.get(key, '0')) == 0
+    for key in ('errors', 'failures', 'skipped')
+)
+print('Owner grant issuer/revocation/audit/JDBC source: 8/8 PASS')
+PYAUDIT
+
 phase='test discovery and skip audit'
 python3 - <<'PY'
 from pathlib import Path
@@ -157,6 +185,11 @@ r=ET.parse(p).getroot()
 assert int(r.get('tests','0')) >= 18
 assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
 print('VN-T14 coordinator discovery/no-skip PASS:',r.get('tests'),'executed tests')
+p=Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.OwnerGrantSchemaPostgresTest.xml')
+r=ET.parse(p).getroot()
+assert int(r.get('tests','0'))==2
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('Owner grant schema/ACL no-skip PASS')
 PY
 phase='repeated concurrent replay'
 for repetition in {1..5}; do

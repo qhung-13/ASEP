@@ -9,8 +9,8 @@ import static io.github.qhung13.asep.codedelivery.TestProjectRemoteReconciliatio
 
 /**
  * VN-T14 delivery protocol with explicitly injected ports. There is deliberately NO Spring
- * component/bean, credential provider or GitLab mutation transport. Only synthetic test ports
- * exist in this repository. A future live implementation requires a separate Owner-authorized
+ * component/bean or enabled credential/mutation transport. Offline-tested adapters
+ * are explicitly injected; live wiring requires a separate Owner-authorized
  * enrollment, controller, credential and transport review.
  *
  * A persisted send claim is an irreversible MAY-HAVE-SENT boundary. On resumption this
@@ -24,7 +24,7 @@ public final class TestProjectDeliveryCoordinator {
         Observation read(TestProjectDeliveryRequest request);
     }
 
-    /** Privileged write capability. No implementation exists outside deterministic tests. */
+    /** Privileged write capability. Only explicitly gated transports may implement it. */
     public interface WritePort {
         /** Never retry a send after an error or a committed send claim. */
         void push(TestProjectDeliveryRequest request, Prepared candidate);
@@ -70,6 +70,7 @@ public final class TestProjectDeliveryCoordinator {
             try { writer.push(request, candidate); }
             catch (RuntimeException unknownOutcome) { responseLost = true; }
             state = reconcile(ledger, reader, state);
+            state = revalidateAfterSend(request,state);
             if (responseLost) return state; // Do not chain another mutation after an unknown response.
         }
         if (state.pushClaimed()) state = reconcile(ledger, reader, state);
@@ -84,10 +85,21 @@ public final class TestProjectDeliveryCoordinator {
             try { writer.createDraft(request, candidate); }
             catch (RuntimeException unknownOutcome) { responseLost = true; }
             state = reconcile(ledger, reader, state);
+            state = revalidateAfterSend(request,state);
             if (responseLost) return state;
         }
         if (state.mrClaimed()) state = reconcile(ledger, reader, state);
         return state;
+    }
+
+    private TestProjectDeliveryRecord revalidateAfterSend(TestProjectDeliveryRequest request,TestProjectDeliveryRecord state) {
+        try { gate.requireBeforeMutation(request,inspectOrUnavailable(request));preparation.prepare(request);return state; }
+        catch(RuntimeException noLongerAuthorized) {
+            // Preserve actual remote facts. A revocation/expiry/cancellation race
+            // cannot be reported as clean completion, even when the POST succeeded.
+            for(int n=0;n<3;n++){var update=ledger.recordResidualRace(state);state=update.record();if(update.applied()||state.residualRace())return state;}
+            throw new DeliveryException(DeliveryException.Kind.UNAVAILABLE);
+        }
     }
 
     /** Read-only recovery is permitted without any live grant or writer capability. */
@@ -119,7 +131,14 @@ public final class TestProjectDeliveryCoordinator {
 
     private static TestProjectDeliveryRecord reconcile(JdbcTestProjectDeliveryLedger ledger,
             ReadPort reader, TestProjectDeliveryRecord record) {
-        return ledger.observe(record, readOrUnavailable(reader, record.request())).record();
+        for(int n=0;n<3;n++) {
+            var update=ledger.observe(record,readOrUnavailable(reader,record.request()));
+            if(update.applied()||update.record().equals(record))return update.record();
+            // A concurrent effect recorder may have advanced the revision. Read
+            // again before applying facts to its new CAS, never discard a race.
+            record=update.record();
+        }
+        throw new DeliveryException(DeliveryException.Kind.UNAVAILABLE);
     }
 
     private static Observation readOrUnavailable(ReadPort reader, TestProjectDeliveryRequest request) {

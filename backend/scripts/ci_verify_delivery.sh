@@ -110,7 +110,7 @@ GRANT SELECT ON asep_delivery_test_proof.instance TO asep_delivery_runtime;
 SQL
 printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_delivery_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=code_delivery\nFLYWAY_DEFAULT_SCHEMA=code_delivery\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
   "$port" "$database" "$migration_password" > "$private_dir/flyway.env"
-phase='Java-owned V1-V6 migrations'
+phase='Java-owned V1-V7 migrations'
 for resource in flyway flyway_validate; do
   docker_cmd create --cidfile "$private_dir/$resource.cid" --label "$label=$run_id" \
     --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
@@ -120,8 +120,8 @@ for resource in flyway flyway_validate; do
   [[ "$(docker_cmd inspect --format '{{.State.ExitCode}}' "$cid")" == 0 ]]
 done
 history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c "SELECT string_agg(version,',' ORDER BY installed_rank) FROM code_delivery.flyway_schema_history WHERE success")"
-[[ "$history" == 1,2,3,4,5,6 ]]
-echo "VN-T13/VN-T14 V1-V6 migrate + repeat/validate PASS (run $run_id)"
+[[ "$history" == 1,2,3,4,5,6,7 ]]
+echo "VN-T13/VN-T14 V1-V7 migrate + repeat/validate PASS (run $run_id)"
 export ASEP_DELIVERY_DISPOSABLE=true ASEP_DELIVERY_DB_USER=asep_delivery_runtime
 export ASEP_DELIVERY_JDBC_URL="jdbc:postgresql://127.0.0.1:$port/$database"
 export ASEP_DELIVERY_DB_PASSWORD="$runtime_password" ASEP_DELIVERY_NONCE="$nonce"
@@ -136,6 +136,19 @@ ASEP_DELIVERY_TEST_MIGRATION_PASSWORD="$migration_password" \
   run_bounded 180 ./mvnw "${maven_options[@]}" \
     -Dasep.delivery.postgres=true \
     -Dtest=OwnerGrantAuthorityPostgresTest test
+
+phase='offline native Git writer and durable inbox/outcome integration'
+ASEP_DELIVERY_TEST_ISSUER_PASSWORD="$issuer_password" \
+ run_bounded 180 ./mvnw "${maven_options[@]}" -Dasep.delivery.postgres=true \
+ -Dtest=DeliveryWriterPostgresTest test
+python3 - <<'PYWRITER'
+from pathlib import Path
+import xml.etree.ElementTree as ET
+r=ET.parse(Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.DeliveryWriterPostgresTest.xml')).getroot()
+assert int(r.get('tests','0'))==10
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('Native Git/API writer + actual JDBC/coordinator/inbox/callback tests: 10/10 PASS')
+PYWRITER
 
 phase='issuer integration test discovery audit'
 python3 - <<'PYAUDIT'

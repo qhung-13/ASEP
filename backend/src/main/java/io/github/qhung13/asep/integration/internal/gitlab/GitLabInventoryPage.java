@@ -15,22 +15,8 @@ final class GitLabInventoryPage {
         return true;
     }
     static boolean complete(JsonNode body, HttpHeaders headers) {
-        if (!collectionShape(body) || body.size() >= 100) return false;
-        String page = single(headers, "X-Page");
-        String perPage = single(headers, "X-Per-Page");
-        String total = single(headers, "X-Total");
-        String pages = single(headers, "X-Total-Pages");
-        String next = single(headers, "X-Next-Page");
-        if (!"1".equals(page) || !"100".equals(perPage) || !Integer.toString(body.size()).equals(total)
-                || !("1".equals(pages) || body.isEmpty() && "0".equals(pages)) || next == null || !next.isEmpty()) return false;
-        // Do not interpret or follow arbitrary relation URLs. Even non-next links can
-        // contradict the single-page metadata; any nonempty Link is conservatively incomplete.
-        List<String> links = headers.get("Link");
-        if (links != null && links.stream().anyMatch(link -> !link.isBlank())) return false;
-        return true;
+        if (!collectionShape(body)) return false;
+        return io.github.qhung13.asep.integration.GitLabTestProjectReader.CollectionObservation.singlePage(body.size(),headers.asMultiValueMap()).complete();
     }
-    private static String single(HttpHeaders headers, String name) {
-        List<String> values = headers.get(name);
-        return values != null && values.size() == 1 ? values.getFirst().trim() : null;
-    }
+
 }

@@ -2,6 +2,7 @@ package io.github.qhung13.asep.integration;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Read-only enrollment observations. An empty collection is not a safe-CI or Owner authorization proof. */
@@ -14,6 +15,15 @@ public interface GitLabTestProjectReader {
             if (count < 0) throw new IllegalArgumentException("Invalid observation count");
         }
         public static CollectionObservation unavailable() { return new CollectionObservation(0, false); }
+        /** Complete first/only offset page; links are never followed. */
+        public static CollectionObservation singlePage(int count,Map<String,List<String>> headers) {
+            java.util.function.Function<String,String> header=name->{var values=headers.entrySet().stream().filter(e->e.getKey().equalsIgnoreCase(name)).flatMap(e->e.getValue().stream()).toList();return values.size()==1?values.getFirst().trim():null;};
+            boolean complete=count<100&&"1".equals(header.apply("X-Page"))&&"100".equals(header.apply("X-Per-Page"))
+                &&Integer.toString(count).equals(header.apply("X-Total"))&&("1".equals(header.apply("X-Total-Pages"))||count==0&&"0".equals(header.apply("X-Total-Pages")))
+                &&"".equals(header.apply("X-Next-Page"))&&(header.apply("Link")==null||header.apply("Link").isEmpty())
+                &&headers.entrySet().stream().filter(e->e.getKey().equalsIgnoreCase("Link")).allMatch(e->e.getValue().stream().allMatch(String::isBlank));
+            return new CollectionObservation(count,complete);
+        }
     }
     record Project(long id, String path, String visibility, boolean archived, String defaultBranch,
             String buildsAccessLevel, Boolean sharedRunnersEnabled, int effectiveAccessLevel) {

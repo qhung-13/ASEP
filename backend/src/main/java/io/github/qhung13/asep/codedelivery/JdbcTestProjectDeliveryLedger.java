@@ -75,8 +75,9 @@ public final class JdbcTestProjectDeliveryLedger {
 
     /** A false application means stale CAS or an illegal state edge: no new send is permitted. */
     public record Update(TestProjectDeliveryRecord record, boolean applied) {}
-    private enum Action { CLAIM_PUSH, CLAIM_MR, OBSERVE }
+    private enum Action { CLAIM_PUSH, CLAIM_MR, OBSERVE, RESIDUAL_RACE }
 
+    public Update recordResidualRace(TestProjectDeliveryRecord expected) { return change(expected,Action.RESIDUAL_RACE,null); }
     public Update claimPush(TestProjectDeliveryRecord expected) { return change(expected, Action.CLAIM_PUSH, null); }
     public Update claimMr(TestProjectDeliveryRecord expected) { return change(expected, Action.CLAIM_MR, null); }
 
@@ -100,6 +101,7 @@ public final class JdbcTestProjectDeliveryLedger {
                     case CLAIM_PUSH -> claimPushResult(stored);
                     case CLAIM_MR -> claimMrResult(stored);
                     case OBSERVE -> observationResult(stored, observation);
+                    case RESIDUAL_RACE -> !stored.pushClaimed()?null:new TestProjectDeliveryRecord(stored.request(),stored.push(),stored.mergeRequest(),stored.pushClaimed(),stored.mrClaimed(),stored.lastConfirmedPushHead(),stored.knownMrIids(),true,stored.revision()+1);
                 };
                 if (next == null || sameFacts(stored, next)) {
                     db.commit();

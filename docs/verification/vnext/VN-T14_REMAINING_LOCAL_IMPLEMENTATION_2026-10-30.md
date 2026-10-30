@@ -62,3 +62,42 @@ Remaining work in this execution: offline writer and native Git contract tests,
 authenticated intents/outcomes and cross-component end-to-end tests, protected
 runtime/deployment templates, final regression/security review and Owner handoff.
 VN-T14 acceptance remains NOT VERIFIED.
+
+## Offline writer and durable Java integration
+
+The narrow writer now implements SHA-1 Git smart HTTP receive-pack, sending exactly
+the sealed new commit/tree/blob with zero old OID for atomic source-ref creation.
+It does not use GitLab's commits API to manufacture a different commit. It never
+updates/deletes main or another branch, uses no local Git credential configuration,
+hooks or shell, follows no redirects/proxies and applies bounded whole-response
+HTTP limits. A real native `git-receive-pack` fixture validates the pack and rejects
+an intervening source-branch collision. Unsupported wire capabilities fail closed.
+The Draft MR API sends only controlled source/target/title/body, with no merge,
+approval or delete capability. The server's actual head/IID are retained even when
+source drift makes the result unusable. Closed MRs cannot confirm delivery. Missing
+pagination metadata or Link headers keep inventory incomplete.
+
+The existing coordinator/ledger remain the send authority boundary. The adapter's
+mutation guard checks current authority and an existing durable step claim. Read
+and write credential capabilities stay separate. No default live transport/bean or
+real credential is configured; the public fixture factory accepts literal loopback
+HTTP only. This is writer code with offline protocol evidence, not GitLab acceptance.
+
+Integration testing exposed a stale-CAS window when the adapter retained an MR IID
+before coordinator reconciliation. The coordinator now re-reads on bounded CAS
+contention; partial observations retain known MR mismatches immediately, and effect
+retention itself retries only local CAS. No external mutation is retried. Added
+post-send authority validation records residual race when a grant, policy or lease
+becomes invalid while a remote effect occurs. Observed identities/heads stay intact.
+
+Java V7 adds an immutable authenticated intent inbox, separate from send claims.
+`DeliveryMessagePump` commits receipt before transport ACK and retries callbacks
+only with the original stable callback IDs. A transport receipt never confirms an
+external effect. Existing VN-T13 behavior/migrations remain preserved.
+
+Validation: 11 native-Git/API unit cases passed; 49 existing inspection/pagination
+and two actual mTLS authority cases passed (62 combined, no skips). Owned Java
+V1–V7 fixture passed 114 existing + 22 grant + 10 writer/inbox cases = 146 selected
+tests, no skips, plus five VN-T13 replay and three VN-T14 CAS repetitions and cleanup
+(run `52c99f091a1a229bf920236788fc145b`). Early compile/fixture failures were fixed;
+one new durable drift assertion initially caught the CAS window described above.

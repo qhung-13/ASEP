@@ -23,7 +23,8 @@ public final class TestProjectRemoteReconciliation {
     }
     public record Branch(long projectId, String name, String head) {}
     public record MergeRequest(long projectId, long sourceProjectId, long targetProjectId, long iid,
-            String source, String target, String head, boolean draft, String title, String body) {
+            String source, String target, String head, boolean draft, String title, String body, String state) {
+        public MergeRequest(long projectId,long sourceProjectId,long targetProjectId,long iid,String source,String target,String head,boolean draft,String title,String body){this(projectId,sourceProjectId,targetProjectId,iid,source,target,head,draft,title,body,"opened");}
         @Override public String toString() { return "TestProjectMrObservation[remote text redacted]"; }
     }
     /** Complete means an exact scoped, non-truncated successful read, not that an empty list proves no effect. */
@@ -63,8 +64,10 @@ public final class TestProjectRemoteReconciliation {
                     && mr.targetProjectId() == r.projectId() && r.sourceBranch().equals(mr.source()) && mr.iid() > 0;
             boolean attributed = scoped && expected.title().equals(mr.title()) && expected.body().equals(mr.body());
             if (recorded.mrClaimed() && attributed) retained.add(mr.iid());
+            if(recorded.mrClaimed()&&attributed) race |= mr.head()!=null&&!r.candidateCommitSha().equals(mr.head())
+                    ||!r.targetBranch().equals(mr.target())||!mr.draft()||!"opened".equals(mr.state());
             allMatch &= scoped && attributed && r.targetBranch().equals(mr.target())
-                    && r.candidateCommitSha().equals(mr.head()) && mr.draft() && seen.add(mr.iid());
+                    && r.candidateCommitSha().equals(mr.head()) && mr.draft() && "opened".equals(mr.state()) && seen.add(mr.iid());
         }
         boolean targetMoved = remote.targetHead() != null && !r.expectedTargetSha().equals(remote.targetHead());
         race |= targetMoved;
@@ -80,6 +83,7 @@ public final class TestProjectRemoteReconciliation {
             return new Result(branch, State.UNKNOWN, retained, confirmedHead, race || !allMatch || !branchMatches);
         }
         MergeRequest mr = remote.mergeRequests().getFirst();
+        if(mr.head()==null) return new Result(branch,State.MANUAL_RECONCILIATION_REQUIRED,retained,confirmedHead,race);
         if (!allMatch || !branchMatches || !retained.contains(mr.iid())) {
             return new Result(branch, State.BLOCKED, retained, confirmedHead, true);
         }

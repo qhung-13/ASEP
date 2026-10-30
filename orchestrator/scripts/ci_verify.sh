@@ -20,7 +20,7 @@ mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
 case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10|manual-admission|delivery-authority) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 # The cross-component fixture is required in full and manual-admission runs.
 # Other focused VN-T11 modes keep their existing toolchain requirements.
-if [[ "$mode" == all || "$mode" == manual-admission ]]; then
+if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-authority ]]; then
   command -v java >/dev/null || { echo 'ERROR: Java 21+ required for private admission fixture' >&2; exit 2; }
 fi
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
@@ -50,7 +50,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_v12 flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
+  for resource in flyway_delivery flyway_v13 flyway_v12 flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -91,7 +91,7 @@ run_bounded() {
   active_group=''
 }
 
-if [[ "$mode" == all || "$mode" == manual-admission ]]; then
+if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-authority ]]; then
   phase='compile private Java admission pipe peer'
   export ASEP_VN_T12_JAVA_BIN="$(command -v java)"
   export ASEP_VN_T12_JAVA_CLASSPATH_FILE="$private_dir/java-classpath"
@@ -99,8 +99,12 @@ if [[ "$mode" == all || "$mode" == manual-admission ]]; then
   if [[ "${ASEP_VN_T12_MAVEN_OFFLINE:-false}" == true ]]; then maven_options+=(--offline); fi
   # Maven owns dependency resolution; no host-wide jar scanning or temporary overlays.
   cd ../backend
-  run_bounded 180 ./mvnw "${maven_options[@]}" -Dtest=ManualAdmissionProcessFixtureTest \
+  run_bounded 180 ./mvnw "${maven_options[@]}" -Dtest=ManualAdmissionProcessFixtureTest,DeliveryProcessFixtureTest \
     "-Dasep.manualBridge.classpathFile=$ASEP_VN_T12_JAVA_CLASSPATH_FILE" test
+  run_bounded 180 ./mvnw "${maven_options[@]}" -DskipTests package
+  export ASEP_DELIVERY_HARNESS_JAR="$private_dir/delivery-harness.jar"
+  cp "$PWD/target/asep-backend-0.0.1-SNAPSHOT.jar" "$ASEP_DELIVERY_HARNESS_JAR"
+  chmod 0444 "$ASEP_DELIVERY_HARNESS_JAR" # Only this bind-mounted harness, no fixture secrets, is readable by verifier UID.
   cd ../orchestrator
   [[ -s "$ASEP_VN_T12_JAVA_CLASSPATH_FILE" ]] || fail
 fi
@@ -118,17 +122,20 @@ python3 - "$private_dir" <<'PY'
 import os, secrets, sys
 from pathlib import Path
 p = Path(sys.argv[1])
-for name in ('admin', 'migrator', 'runtime', 'probe', 'authority'):
+for name in ('admin', 'migrator', 'runtime', 'probe', 'authority', 'delivery_migrator', 'delivery_runtime', 'delivery_issuer'):
     (p / name).write_text(secrets.token_hex(32) + '\n')
 (p / 'token').write_text(secrets.token_hex(32) + '\n')
 for f in p.iterdir():
-    os.chmod(f, 0o600)
+    os.chmod(f, 0o444 if f.name == "delivery-harness.jar" else 0o600)
 PY
 read -r admin_password < "$private_dir/admin"
 read -r migrator_password < "$private_dir/migrator"
 read -r runtime_password < "$private_dir/runtime"
 read -r probe_password < "$private_dir/probe"
 read -r authority_password < "$private_dir/authority"
+read -r delivery_migration_password < "$private_dir/delivery_migrator"
+read -r delivery_runtime_password < "$private_dir/delivery_runtime"
+read -r delivery_issuer_password < "$private_dir/delivery_issuer"
 printf 'POSTGRES_USER=postgres\nPOSTGRES_DB=%s\nPOSTGRES_PASSWORD=%s\n' "$database" "$admin_password" > "$private_dir/postgres.env"
 
 phase='disposable PostgreSQL creation'
@@ -159,6 +166,11 @@ CREATE ROLE asep_orch_migrator LOGIN PASSWORD '${migrator_password}';
 CREATE ROLE asep_orch_runtime LOGIN PASSWORD '${runtime_password}';
 CREATE ROLE asep_orch_probe LOGIN PASSWORD '${probe_password}';
 CREATE ROLE asep_orch_authority LOGIN PASSWORD '${authority_password}';
+CREATE ROLE asep_delivery_migrator LOGIN PASSWORD '${delivery_migration_password}';
+CREATE ROLE asep_delivery_runtime LOGIN PASSWORD '${delivery_runtime_password}';
+CREATE ROLE asep_delivery_issuer LOGIN PASSWORD '${delivery_issuer_password}';
+CREATE SCHEMA code_delivery AUTHORIZATION asep_delivery_migrator;
+REVOKE ALL ON SCHEMA code_delivery FROM PUBLIC;
 CREATE SCHEMA orchestration AUTHORIZATION asep_orch_migrator;
 REVOKE ALL ON SCHEMA orchestration FROM PUBLIC;
 CREATE SCHEMA asep_test_harness AUTHORIZATION postgres;
@@ -169,8 +181,8 @@ CREATE TABLE asep_test_harness.instance (
 );
 INSERT INTO asep_test_harness.instance
   SELECT true, '${nonce}', current_database(), pg_postmaster_start_time();
-GRANT USAGE ON SCHEMA asep_test_harness TO asep_orch_runtime, asep_orch_probe;
-GRANT SELECT ON asep_test_harness.instance TO asep_orch_runtime;
+GRANT USAGE ON SCHEMA asep_test_harness TO asep_orch_runtime, asep_orch_probe,asep_delivery_runtime;
+GRANT SELECT ON asep_test_harness.instance TO asep_orch_runtime,asep_delivery_runtime;
 CREATE TABLE public.guard_mutation_probe (id integer GENERATED ALWAYS AS IDENTITY);
 GRANT SELECT, INSERT ON public.guard_mutation_probe TO asep_orch_runtime, asep_orch_probe;
 GRANT USAGE ON SEQUENCE public.guard_mutation_probe_id_seq TO asep_orch_runtime, asep_orch_probe;
@@ -445,13 +457,48 @@ history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database
 [[ "$history" == '1,2,3,4,5,6,7,8,9,10,11,12' ]] || fail
 echo 'V12 controlled evidence migration PASS'
 
+phase='delivery messages V13 migration'
+docker_cmd create --cidfile "$private_dir/flyway_v13.cid" --label "$owner_label=$run_id" \
+ --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
+ flyway/flyway:11 -target=13 migrate >"$private_dir/flyway-v13-create.log" 2>&1
+flyway_v13_id="$(cat "$private_dir/flyway_v13.cid")"
+docker_cmd start "$flyway_v13_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v13_id" > "$private_dir/flyway-v13-exit"
+[[ "$(cat "$private_dir/flyway-v13-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+ "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7,8,9,10,11,12,13' ]] || fail
+echo 'V13 durable delivery messages migration PASS'
+
+phase='Java-owned delivery schema for cross-component fixture'
+printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_delivery_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=code_delivery\nFLYWAY_DEFAULT_SCHEMA=code_delivery\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
+ "$port" "$database" "$delivery_migration_password" > "$private_dir/delivery-flyway.env"
+docker_cmd create --cidfile "$private_dir/flyway_delivery.cid" --label "$owner_label=$run_id" \
+ --network host --env-file "$private_dir/delivery-flyway.env" -v "$PWD/../backend/db/migrations:/flyway/sql:ro" \
+ flyway/flyway:11 migrate >"$private_dir/delivery-flyway-create.log" 2>&1
+delivery_flyway_id="$(cat "$private_dir/flyway_delivery.cid")"
+docker_cmd start "$delivery_flyway_id" >/dev/null
+run_bounded 120 docker wait "$delivery_flyway_id" > "$private_dir/delivery-flyway-exit"
+[[ "$(cat "$private_dir/delivery-flyway-exit")" == 0 ]] || fail
+if [[ "$mode" == all || "$mode" == delivery-authority ]]; then
+ image_id="$(docker_cmd image inspect --format '{{.Id}}' flyway/flyway:11)"
+ python3 - "$private_dir" "$port" "$database" "$nonce" "$ASEP_DELIVERY_HARNESS_JAR" "${image_id#sha256:}" <<'PYCROSS'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+(root/'cross-component.json').write_text(json.dumps(dict(jdbcUrl='jdbc:postgresql://127.0.0.1:'+sys.argv[2]+'/'+sys.argv[3],runtimePasswordFile=str(root/'delivery_runtime'),issuerPasswordFile=str(root/'delivery_issuer'),nonce=sys.argv[4],harnessJar=sys.argv[5],imageSha256=sys.argv[6])))
+PYCROSS
+fi
+
+authority_pattern='^Test(DeliveryAuthority|ControlledDelivery|DeliveryMessages)'
+if [[ "$mode" == all || "$mode" == delivery-authority ]]; then authority_pattern='^Test(DeliveryAuthority|ControlledDelivery|DeliveryMessages|DeliveryPipeline)'; fi
 phase='protected delivery authority PostgreSQL regression'
 # Only this dedicated group receives owned-fixture authority/migration passwords.
 # Never export these to legacy worker/agent child-process fixtures.
 if ! ASEP_DELIVERY_AUTHORITY_TEST_PASSWORD="$authority_password" \
 ASEP_DELIVERY_MIGRATOR_TEST_PASSWORD="$migrator_password" \
+ASEP_DELIVERY_FIXTURE_CONFIG="$private_dir/cross-component.json" \
 run_bounded 180 go test -race -count=1 -tags=integration,deliveryauthority -timeout=120s -v \
-  -run '^Test(DeliveryAuthority|ControlledDelivery)' ./internal/workflow > "$private_dir/delivery-authority.log" 2>&1; then
+  -run "$authority_pattern" ./internal/workflow > "$private_dir/delivery-authority.log" 2>&1; then
   cat "$private_dir/delivery-authority.log"
   fail
 fi
@@ -716,4 +763,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11/VN-T14 disposable verification PASS: proof guard, V1-V11, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'
+echo 'VN-T11/VN-T14 disposable verification PASS: proof guard, V1-V13 + Java V1-V7, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'

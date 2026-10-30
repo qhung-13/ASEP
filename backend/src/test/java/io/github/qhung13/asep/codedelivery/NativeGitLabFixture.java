@@ -23,13 +23,14 @@ final class NativeGitLabFixture implements AutoCloseable {
     final Path bare;final HttpServer server;final java.util.concurrent.ExecutorService handlers=Executors.newCachedThreadPool();
     final AtomicReference<Throwable> errors=new AtomicReference<>();final AtomicInteger pushes=new AtomicInteger(),creates=new AtomicInteger(),forbidden=new AtomicInteger();
     final List<Map<String,Object>> mrs=new CopyOnWriteArrayList<>();
-    Runnable beforePush=()->{},beforeMr=()->{};boolean losePush,loseMr,incompleteMrs,wrongProject,unreadable;int mrStatus=201;
+    volatile Runnable beforePush=()->{},beforeMr=()->{};volatile boolean losePush,loseMr,incompleteMrs,wrongProject,unreadable;volatile int mrStatus=201;
     final byte[] base;final String baseSha,baseTree;
     NativeGitLabFixture(Path directory)throws Exception{
         Files.createDirectories(directory);bare=directory.resolve("repo.git");
-        git(null,"init","--bare","--initial-branch=main",bare.toString());
+        boolean fresh=!Files.exists(bare);if(fresh)git(null,"init","--bare","--initial-branch=main",bare.toString());
         baseTree=gitId(ObjectType.TREE,new byte[0]);base=("tree "+baseTree+"\nauthor Base <base@invalid> 1793145600 +0000\ncommitter Base <base@invalid> 1793145600 +0000\n\nBase\n").getBytes(StandardCharsets.US_ASCII);baseSha=gitId(ObjectType.COMMIT,base);
-        put(ObjectType.TREE,new byte[0]);put(ObjectType.COMMIT,base);move("main",baseSha);
+        if(fresh){put(ObjectType.TREE,new byte[0]);put(ObjectType.COMMIT,base);move("main",baseSha);}
+        Path persisted=directory.resolve("mrs.json");if(Files.isRegularFile(persisted)){var list=JdbcDeliveryLedger.JSON.readTree(Files.readAllBytes(persisted));for(var node:list){@SuppressWarnings("unchecked") Map<String,Object> mr=JdbcDeliveryLedger.JSON.convertValue(node,Map.class);mrs.add(new java.util.HashMap<>(mr));}}
         server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);server.setExecutor(handlers);
         server.createContext("/",exchange->{
             try{
@@ -64,7 +65,7 @@ final class NativeGitLabFixture implements AutoCloseable {
                         var body=JdbcDeliveryLedger.JSON.readTree(exchange.getRequestBody().readNBytes(8193));beforeMr.run();String source=body.get("source_branch").asString();
                         var result=new java.util.HashMap<String,Object>();result.put("project_id",87786140);result.put("source_project_id",87786140);result.put("target_project_id",87786140);result.put("iid",mrs.size()+1);
                         result.put("source_branch",source);result.put("target_branch",body.get("target_branch").asString());result.put("sha",head(source));result.put("draft",true);result.put("state","opened");
-                        result.put("title",body.get("title").asString());result.put("description",body.get("description").asString());mrs.add(result);
+                        result.put("title",body.get("title").asString());result.put("description",body.get("description").asString());mrs.add(result);Files.write(directory.resolve("mrs.json"),json(mrs));
                         if(loseMr){exchange.close();return;}send(exchange,201,json(result));return;
                     }
                 }

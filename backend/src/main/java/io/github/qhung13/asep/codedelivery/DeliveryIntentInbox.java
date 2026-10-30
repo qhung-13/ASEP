@@ -28,7 +28,12 @@ public final class DeliveryIntentInbox {
                     }
                 }
                 db.commit();
-            }catch(Exception failure){try{db.rollback();}catch(Exception ignored){}throw new DeliveryException(DeliveryException.Kind.CONFLICT);}
+            }catch(Exception failure){try{db.rollback();}catch(Exception ignored){}if(failure instanceof java.sql.SQLException)throw new DeliveryException(DeliveryException.Kind.UNAVAILABLE);throw new DeliveryException(DeliveryException.Kind.CONFLICT);}
+        }catch(java.sql.SQLException unavailable){throw new DeliveryException(DeliveryException.Kind.UNAVAILABLE);}
+    }
+    public boolean contains(TestProjectDeliveryRequest request){
+        try(var db=database.getConnection();var query=db.prepareStatement("SELECT request_hash,request_json FROM code_delivery.delivery_intent_inbox WHERE operation_id=?")){
+            query.setObject(1,request.operationId());try(var row=query.executeQuery()){return row.next()&&request.bodyHash().equals(row.getString(1))&&request.equals(JdbcDeliveryLedger.JSON.readValue(row.getString(2),TestProjectDeliveryRequest.class));}
         }catch(java.sql.SQLException unavailable){throw new DeliveryException(DeliveryException.Kind.UNAVAILABLE);}
     }
     public List<TestProjectDeliveryRequest> requests(int limit){

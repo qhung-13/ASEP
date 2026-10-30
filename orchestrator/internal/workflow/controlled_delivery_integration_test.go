@@ -144,3 +144,26 @@ func TestControlledDeliveryRuntimeCannotIssueProofOrRewriteHistory(t *testing.T)
 		t.Fatal("issuer rewrote immutable proof")
 	}
 }
+
+func TestControlledDeliveryRevocationInvalidatesDerivedAuthority(t *testing.T) {
+	s, issuer, c := controlledFixture(t)
+	ctx := testContext(t)
+	if issuer.SubmitControlledEvidence(ctx, c) != nil {
+		t.Fatal("submission failed")
+	}
+	if _, err := s.AdvanceControlledReview(ctx, c.EvidenceID); err != nil {
+		t.Fatal(err)
+	}
+	if issuer.IssueDeliveryReview(ctx, c.EvidenceID) != nil {
+		t.Fatal("review issue failed")
+	}
+	if _, err := s.AuthorizeDelivery(ctx, c.EvidenceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuer.db.ExecContext(ctx, `UPDATE orchestration.controlled_candidate_evidence SET revoked_at=clock_timestamp() WHERE evidence_id=$1::uuid`, c.EvidenceID); err != nil {
+		t.Fatal("revocation failed")
+	}
+	if _, err := s.CurrentDeliveryAuthority(ctx, c.Request.OperationID, c.Request.RunID, c.Request.AttemptID); err == nil {
+		t.Fatal("revoked controller proof retained derived authority")
+	}
+}

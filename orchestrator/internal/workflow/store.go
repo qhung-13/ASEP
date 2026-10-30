@@ -18,7 +18,7 @@ import (
 
 // Store is trusted Go orchestration state, NOT an untrusted agent interface.
 // Admission inputs are assumed to have passed Java authorization/policy checks.
-// The cross-service authentication/gate adapter remains a later ticket.
+// The protected delivery listener is separate from development admission/worker routes.
 type Store struct {
 	db          *sql.DB
 	databaseURL string // Retained privately for independent, bounded receipt reconciliation.

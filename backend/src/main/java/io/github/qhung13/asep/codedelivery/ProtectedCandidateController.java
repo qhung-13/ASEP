@@ -37,8 +37,13 @@ public final class ProtectedCandidateController {
         this.root=root.toAbsolutePath().normalize();this.controllerUid=controllerUid;this.profile=profile;
         this.baseSource=baseSource;this.verifier=verifier;this.clock=clock;
     }
+    public ControllerEvidenceStore existing(Job job){
+        var old=new ControllerEvidenceStore(root,controllerUid,job.operationId());
+        if(!matches(job,old.request()))throw ControllerEvidenceStore.denied();
+        new TestProjectDeliveryPreparation(old,old,profile,clock).prepare(old.request());return old;
+    }
     public ControllerEvidenceStore produce(Job job){
-        Path staging=null;
+        Path staging=null;String phase="start";
         try {
             ProtectedOperatorFiles.directory(root,controllerUid,false);
             Path operations=root.resolve("operations");directory(operations);
@@ -49,8 +54,8 @@ public final class ProtectedCandidateController {
                 if(!matches(job,old.request()))throw ControllerEvidenceStore.denied();
                 new TestProjectDeliveryPreparation(old,old,profile,clock).prepare(old.request());return old;
             }
-            staging=Files.createTempDirectory(operations,".issuing-",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
-            byte[] suppliedBase=baseSource.read(ObjectType.COMMIT,job.baseSha(),8192);
+            phase="stage";staging=Files.createTempDirectory(operations,".issuing-",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            phase="base";byte[] suppliedBase=baseSource.read(ObjectType.COMMIT,job.baseSha(),8192);
             if(suppliedBase==null||suppliedBase.length>8192)throw ControllerEvidenceStore.denied();
             byte[] base=suppliedBase.clone();
             if(base.length>8192||!gitId(ObjectType.COMMIT,base).equals(job.baseSha()))throw ControllerEvidenceStore.denied();
@@ -69,7 +74,7 @@ public final class ProtectedCandidateController {
             UUID sealId=UUID.randomUUID(),verificationId=UUID.randomUUID();String sha=gitId(ObjectType.COMMIT,candidate);
             var partial=request(job,sha,candidateTree,"0".repeat(64),sealId,verificationId);
             var request=request(job,sha,candidateTree,manifestHash(partial),sealId,verificationId);
-            for(var e:Map.of("commit/"+job.baseSha(),base,"commit/"+sha,candidate,"tree/"+parsed.tree(),originalTree,"tree/"+candidateTree,tree,"blob/"+blob,probe).entrySet()){
+            phase="objects";for(var e:Map.of("commit/"+job.baseSha(),base,"commit/"+sha,candidate,"tree/"+parsed.tree(),originalTree,"tree/"+candidateTree,tree,"blob/"+blob,probe).entrySet()){
                 Path object=staging.resolve("objects").resolve(e.getKey());directory(object.getParent().getParent());directory(object.getParent());write(object,e.getValue());
             }
             write(staging.resolve("request.json"),JdbcDeliveryLedger.JSON.writeValueAsBytes(request));
@@ -79,9 +84,9 @@ public final class ProtectedCandidateController {
             var seal=new Seal(sealId,job.runId(),job.producerAttemptId(),job.baseSha(),sha,candidateTree,request.manifestSha256(),stopped,sealed,sealed.plus(profile.maximumReceiptAge()));
             // The child UID can read only this mount, not the private controller parent.
             try(var frozen=Files.walk(staging)) {for(Path p:frozen.toList())Files.setPosixFilePermissions(p,PosixFilePermissions.fromString(Files.isDirectory(p)?"r-xr-xr-x":"r--r--r--"));}
-            VerificationReport report;
+            phase="verify";VerificationReport report;
             try {report=verifier.verify(staging,request);} finally {Files.setPosixFilePermissions(staging,PosixFilePermissions.fromString("rwxr-x---"));}
-            Instant verified=clock.instant();
+            phase="receipts";Instant verified=clock.instant();
             if(report==null||report.timedOut()||report.exitCode()!=0||report.discovered()<profile.minimumTests()
                     ||report.executed()!=report.discovered()||report.failed()!=0||report.skipped()!=0
                     ||!profile.harnessSha256().equals(report.harnessSha256())||!profile.imageSha256().equals(report.imageSha256())
@@ -91,8 +96,10 @@ public final class ProtectedCandidateController {
             write(staging.resolve("seal.json"),sealBytes);write(staging.resolve("verification.json"),verificationBytes);
             byte[] requestBytes=ProtectedOperatorFiles.read(staging,staging.resolve("request.json"),controllerUid,8192,false);
             write(staging.resolve("index.json"),JdbcDeliveryLedger.JSON.writeValueAsBytes(new ControllerEvidenceStore.Index(ControllerEvidenceStore.digest(requestBytes),ControllerEvidenceStore.digest(sealBytes),ControllerEvidenceStore.digest(verificationBytes))));
+            phase="validate";
             // Validate the actual persisted snapshot and real report before publication.
             var evidence=loadStaging(staging,request,seal,verification);new TestProjectDeliveryPreparation(evidence,evidence,profile,clock).prepare(request);
+            phase="publish";
             // Serialize publishers on this controller-owned directory. ATOMIC_MOVE is not
             // exclusive on every filesystem; the lock + second existence check prevent replacement.
             try(var lock=FileChannel.open(operations.resolve(".publish.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS);var held=lock.lock()){
@@ -101,7 +108,7 @@ public final class ProtectedCandidateController {
                 try(var dir=FileChannel.open(operations,StandardOpenOption.READ)){dir.force(true);}
             }
             return new ControllerEvidenceStore(root,controllerUid,job.operationId());
-        }catch(Exception denied){throw ControllerEvidenceStore.denied();}
+        }catch(Exception denied){throw new IllegalStateException("Controller issuance denied at "+phase+" ("+denied.getClass().getSimpleName()+")"+(denied.getMessage()!=null&&denied.getMessage().startsWith("Isolated verifier denied at ")?" "+denied.getMessage():""));}
         finally{if(staging!=null)removeOwnStaging(staging);}
     }
     private ProtectedDeliveryEvidence loadStaging(Path staged,TestProjectDeliveryRequest r,Seal seal,Verification verification)throws Exception{

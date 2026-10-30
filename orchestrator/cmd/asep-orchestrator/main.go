@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/qhung-13/ASEP/orchestrator/internal/deliveryapi"
 	"github.com/qhung-13/ASEP/orchestrator/internal/httpapi"
 	"github.com/qhung-13/ASEP/orchestrator/internal/workflow"
 )
@@ -21,6 +22,15 @@ import (
 func main() {
 	if len(os.Args) == 1 {
 		fmt.Println("ASEP Orchestrator bootstrap OK")
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "serve-delivery" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+		defer stop()
+		if err := deliveryapi.RunProtected(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "protected delivery service unavailable")
+			os.Exit(1)
+		}
 		return
 	}
 	if len(os.Args) != 2 || os.Args[1] != "serve" {

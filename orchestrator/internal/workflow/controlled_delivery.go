@@ -23,6 +23,8 @@ type ControlledReceipt struct {
 	ProducerAttemptID string `json:"producerAttemptId"`
 	TaskID            string `json:"taskId"`
 	RunVersion        int64  `json:"runVersion"`
+	State             string `json:"state"`
+	LeaseEpoch        int64  `json:"leaseEpoch"`
 }
 
 // AdmitControlledProbe is a separate, explicitly bounded controller entry. It does
@@ -38,11 +40,25 @@ func (s *Store) AdmitControlledProbe(ctx context.Context, c ControlledStart) (Co
 	if err != nil {
 		return ControlledReceipt{}, ErrDeliveryDenied
 	}
-	return ControlledReceipt{receipt.RunID, receipt.AttemptID, receipt.TaskID, 1}, nil
+	var state string
+	var epoch int64
+	if s.db.QueryRowContext(ctx, `SELECT r.state,t.lease_epoch FROM orchestration.workflow_runs r JOIN orchestration.task_deliveries t ON t.task_id=$2::uuid WHERE r.run_id=$1::uuid`, receipt.RunID, receipt.TaskID).Scan(&state, &epoch) != nil {
+		return ControlledReceipt{}, ErrDeliveryDenied
+	}
+	return ControlledReceipt{receipt.RunID, receipt.AttemptID, receipt.TaskID, 1, state, epoch}, nil
 }
 func (s *Store) ClaimControlledProbe(ctx context.Context, run string) (TaskLease, error) {
 	var eligible bool
-	if !canonicalUUID(run) || s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.workflow_runs WHERE run_id=$1::uuid AND trigger_kind='CONTROLLER_PROBE' AND state='IMPLEMENTING' AND run_version=1)`, run).Scan(&eligible) != nil || !eligible {
+	if !canonicalUUID(run) || s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.workflow_runs r JOIN orchestration.delivery_policies p ON p.policy_id=r.policy_id AND p.policy_epoch=r.policy_epoch WHERE r.run_id=$1::uuid AND r.trigger_kind='CONTROLLER_PROBE' AND r.state='IMPLEMENTING' AND r.run_version=1 AND p.enabled AND p.expires_at>clock_timestamp())`, run).Scan(&eligible) != nil || !eligible {
+		return TaskLease{}, ErrDeliveryDenied
+	}
+	var prior TaskLease
+	prior.RunID = run
+	err := s.db.QueryRowContext(ctx, `SELECT task_id::text,attempt_id::text,stage,claimant_id,lease_epoch,delivery_count,lease_expires_at FROM orchestration.task_deliveries WHERE run_id=$1::uuid AND stage='IMPLEMENTING' AND status='LEASED' AND claimant_id=$2 AND lease_expires_at>clock_timestamp()`, run, ControllerClaimant).Scan(&prior.TaskID, &prior.AttemptID, &prior.Stage, &prior.ClaimantID, &prior.LeaseEpoch, &prior.DeliveryCount, &prior.ExpiresAt)
+	if err == nil {
+		return prior, nil
+	}
+	if err != sql.ErrNoRows {
 		return TaskLease{}, ErrDeliveryDenied
 	}
 	return s.ClaimForRun(ctx, run, ControllerClaimant, 120)
@@ -107,7 +123,7 @@ func OpenReviewIssuer(ctx context.Context, databaseURL string) (*ReviewIssuer, e
 	}
 	db.SetMaxOpenConns(4)
 	var allowed bool
-	err = db.QueryRowContext(ctx, `SELECT pg_has_role(session_user,'asep_orch_authority','USAGE') AND session_user=current_user AND NOT(rolsuper OR rolcreaterole OR rolcreatedb OR rolbypassrls) FROM pg_roles WHERE rolname=session_user`).Scan(&allowed)
+	err = db.QueryRowContext(ctx, `SELECT pg_has_role(session_user,'asep_orch_authority','USAGE') AND session_user=current_user AND NOT(rolsuper OR rolcreaterole OR rolcreatedb OR rolbypassrls) AND NOT pg_has_role(session_user,'asep_orch_runtime','USAGE') AND NOT has_schema_privilege(session_user,'orchestration','CREATE') AND NOT has_table_privilege(session_user,'orchestration.workflow_runs','UPDATE') FROM pg_roles WHERE rolname=session_user`).Scan(&allowed)
 	if err != nil || !allowed {
 		db.Close()
 		return nil, ErrDeliveryDenied
@@ -310,4 +326,16 @@ func (i *ReviewIssuer) IssueDeliveryReview(ctx context.Context, id string) error
 		return ErrDeliveryDenied
 	}
 	return nil
+}
+
+func (s *Store) HeartbeatControlledProbe(ctx context.Context, lease TaskLease) error {
+	if lease.ClaimantID != ControllerClaimant || lease.Stage != "IMPLEMENTING" {
+		return ErrDeliveryDenied
+	}
+	var eligible bool
+	if s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.workflow_runs r JOIN orchestration.delivery_policies p ON p.policy_id=r.policy_id AND p.policy_epoch=r.policy_epoch WHERE r.run_id=$1::uuid AND r.trigger_kind='CONTROLLER_PROBE' AND r.state='IMPLEMENTING' AND r.run_version=1 AND p.enabled AND p.expires_at>clock_timestamp())`, lease.RunID).Scan(&eligible) != nil || !eligible {
+		return ErrDeliveryDenied
+	}
+	_, err := s.Heartbeat(ctx, lease, 120)
+	return err
 }

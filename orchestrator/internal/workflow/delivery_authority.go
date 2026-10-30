@@ -275,12 +275,14 @@ func (s *Store) CurrentDeliveryAuthority(ctx context.Context, operation, run, pr
         JOIN orchestration.delivery_review_evidence e ON e.evidence_id=a.evidence_id
         JOIN orchestration.workflow_runs r ON r.run_id=a.run_id
         JOIN orchestration.delivery_policies p ON p.policy_id=r.policy_id
+        LEFT JOIN orchestration.controlled_candidate_evidence c ON c.evidence_id=e.evidence_id
         JOIN orchestration.stage_attempts d ON d.attempt_id=a.delivery_attempt_id AND d.run_id=r.run_id
         WHERE a.operation_id=$1::uuid AND a.run_id=$2::uuid AND e.producer_attempt_id=$3::uuid
           AND e.run_id=a.run_id AND e.request_hash=a.request_hash
           AND r.state='DELIVERY_PENDING' AND r.run_version=e.expected_run_version+1
           AND r.policy_id=e.policy_id AND r.policy_epoch=e.policy_epoch AND p.policy_epoch=r.policy_epoch
           AND p.enabled AND p.expires_at>clock_timestamp() AND e.expires_at>clock_timestamp() AND e.revoked_at IS NULL
+          AND (c.evidence_id IS NULL OR c.revoked_at IS NULL AND c.expires_at>clock_timestamp())
           AND d.stage='DELIVERY_PENDING' AND d.state='PENDING'
           AND r.gitlab_project_id='87786140' AND r.target_branch='main'`, operation, run, producer).Scan(&body, &result.AuthorizedRequestHash, &result.RunVersion, &result.State, &result.PolicyID, &result.PolicyEpoch, &result.ProjectID, &result.TargetBranch, &result.BaseSHA, &result.TargetHeadSHA, &result.ValidUntil)
 	if err != nil {
@@ -313,9 +315,9 @@ func (s *Store) CancelDelivery(ctx context.Context, run string, expectedVersion 
 		return ErrDeliveryDenied
 	}
 	defer tx.Rollback()
-	var state string
+	var state, trigger string
 	var version int64
-	if tx.QueryRowContext(ctx, `SELECT state,run_version FROM orchestration.workflow_runs WHERE run_id=$1::uuid FOR UPDATE`, run).Scan(&state, &version) != nil {
+	if tx.QueryRowContext(ctx, `SELECT state,trigger_kind,run_version FROM orchestration.workflow_runs WHERE run_id=$1::uuid FOR UPDATE`, run).Scan(&state, &trigger, &version) != nil {
 		return ErrDeliveryDenied
 	}
 	// Stable per-run/version stop intent. Historical replay reports only its original
@@ -329,7 +331,7 @@ func (s *Store) CancelDelivery(ctx context.Context, run string, expectedVersion 
 	if accepted {
 		return nil
 	}
-	if version != expectedVersion || (state != "REVIEWING" && state != "DELIVERY_PENDING") {
+	if version != expectedVersion || (state != "REVIEWING" && state != "DELIVERY_PENDING" && !(state == "IMPLEMENTING" && trigger == "CONTROLLER_PROBE")) {
 		return ErrDeliveryDenied
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE orchestration.workflow_runs SET state='CANCEL_REQUESTED',run_version=run_version+1,updated_at=clock_timestamp() WHERE run_id=$1::uuid`, run)
@@ -366,4 +368,15 @@ func (s *Store) CancelDelivery(ctx context.Context, run string, expectedVersion 
 func deliveryCancelHash(run string, version int64) string {
 	digest := sha256.Sum256([]byte("asep-delivery-cancel-v1:" + run + ":" + strconv.FormatInt(version, 10)))
 	return hex.EncodeToString(digest[:])
+}
+
+// ValidateDeliveryRuntime enforces the protected listener's database identity.
+// Development Open remains compatible; it does not grant this deployment capability.
+func (s *Store) ValidateDeliveryRuntime(ctx context.Context) error {
+	var allowed bool
+	err := s.db.QueryRowContext(ctx, `SELECT session_user=current_user AND session_user='asep_orch_runtime' AND NOT(rolsuper OR rolcreaterole OR rolcreatedb OR rolbypassrls) AND NOT pg_has_role(session_user,'asep_orch_authority','USAGE') AND NOT has_schema_privilege(session_user,'orchestration','CREATE') AND NOT has_table_privilege(session_user,'orchestration.delivery_review_evidence','INSERT') AND NOT has_table_privilege(session_user,'orchestration.controlled_candidate_evidence','INSERT') FROM pg_roles WHERE rolname=session_user`).Scan(&allowed)
+	if err != nil || !allowed {
+		return ErrDeliveryDenied
+	}
+	return nil
 }

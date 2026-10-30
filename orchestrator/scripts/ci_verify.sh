@@ -50,7 +50,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
+  for resource in flyway_v12 flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -432,13 +432,26 @@ history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database
 v11_after="$(docker_cmd exec -i "$postgres_id" psql -X -v ON_ERROR_STOP=1 -qAt -U postgres -d "$database" < "$private_dir/v9-snapshot.sql")"
 [[ "$v9_before" == "$v11_after" ]] || fail
 echo 'V11 delivery authority migration PASS; populated V1-V10 facts preserved'
+phase='controlled candidate evidence V12 migration'
+docker_cmd create --cidfile "$private_dir/flyway_v12.cid" --label "$owner_label=$run_id" \
+ --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
+ flyway/flyway:11 -target=12 migrate >"$private_dir/flyway-v12-create.log" 2>&1
+flyway_v12_id="$(cat "$private_dir/flyway_v12.cid")"
+docker_cmd start "$flyway_v12_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v12_id" > "$private_dir/flyway-v12-exit"
+[[ "$(cat "$private_dir/flyway-v12-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+ "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7,8,9,10,11,12' ]] || fail
+echo 'V12 controlled evidence migration PASS'
+
 phase='protected delivery authority PostgreSQL regression'
 # Only this dedicated group receives owned-fixture authority/migration passwords.
 # Never export these to legacy worker/agent child-process fixtures.
 if ! ASEP_DELIVERY_AUTHORITY_TEST_PASSWORD="$authority_password" \
 ASEP_DELIVERY_MIGRATOR_TEST_PASSWORD="$migrator_password" \
 run_bounded 180 go test -race -count=1 -tags=integration,deliveryauthority -timeout=120s -v \
-  -run '^TestDeliveryAuthority' ./internal/workflow > "$private_dir/delivery-authority.log" 2>&1; then
+  -run '^Test(DeliveryAuthority|ControlledDelivery)' ./internal/workflow > "$private_dir/delivery-authority.log" 2>&1; then
   cat "$private_dir/delivery-authority.log"
   fail
 fi

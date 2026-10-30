@@ -33,7 +33,8 @@ public final class OwnerApprovalCommand {
             ProtectedOperatorFiles.hierarchy(input.getParent(),policy.operatorUid());
             byte[] body=ProtectedOperatorFiles.read(input.getParent(),input,policy.operatorUid(),8192,true);
             var request=JdbcDeliveryLedger.JSON.readValue(body,TestProjectDeliveryRequest.class);
-            var evidence=new ProtectedDeliveryEvidence(policy.evidenceRoot(),policy.evidenceUid());
+            var evidence=new ControllerEvidenceStore(policy.evidenceRoot(),policy.evidenceUid(),request.operationId());
+            if(!evidence.request().equals(request))throw new IllegalStateException();
             var preparation=new TestProjectDeliveryPreparation(evidence,evidence,policy.profile(),Clock.systemUTC());
             // Revocation remains available after receipt expiry or verifier outage; it cannot create authority.
             if (!revoke) preparation.prepare(request);

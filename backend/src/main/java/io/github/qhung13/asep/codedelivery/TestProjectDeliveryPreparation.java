@@ -55,8 +55,8 @@ public final class TestProjectDeliveryPreparation {
     public record Prepared(TestProjectDeliveryRequest request, Draft draft) {
         @Override public String toString() { return "PreparedTestProjectCandidate[not write authority]"; }
     }
-    private record Entry(String mode, String name, String sha) {}
-    private record CommitObject(String tree, List<String> parents, String message) {}
+    record Entry(String mode, String name, String sha) {}
+    record CommitObject(String tree, List<String> parents, String message) {}
     private final Artifacts artifacts;
     private final Receipts receipts;
     private final Profile profile;
@@ -110,7 +110,7 @@ public final class TestProjectDeliveryPreparation {
         return issued != null && expires != null && !issued.isAfter(now) && expires.isAfter(now)
                 && expires.isAfter(issued) && Duration.between(issued, now).compareTo(profile.maximumReceiptAge()) <= 0;
     }
-    private void inspectObjects(TestProjectDeliveryRequest r) {
+    void inspectObjects(TestProjectDeliveryRequest r) {
         CommitObject candidate = commit(object(ObjectType.COMMIT, r.candidateCommitSha(), 8192));
         CommitObject base = commit(object(ObjectType.COMMIT, r.baseSha(), 8192));
         if (!candidate.tree.equals(r.candidateTreeSha()) || !candidate.parents.equals(List.of(r.baseSha()))
@@ -152,7 +152,7 @@ public final class TestProjectDeliveryPreparation {
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException("Required digest unavailable"); }
     }
     private static boolean sha256(String value) { return value != null && value.matches("[0-9a-f]{64}"); }
-    private static CommitObject commit(byte[] bytes) {
+    static CommitObject commit(byte[] bytes) {
         // Parse only Git headers; never execute filters, hooks, signatures, attributes or build code.
         String text = new String(bytes, StandardCharsets.ISO_8859_1);
         int boundary = text.indexOf("\n\n");
@@ -177,7 +177,7 @@ public final class TestProjectDeliveryPreparation {
         return new CommitObject(tree, List.copyOf(parents), text.substring(boundary + 2)); // Root/merge bases are supported; candidate must have exactly the base parent.
     }
     private static final Comparator<Entry> ENTRY_ORDER = Comparator.comparing(e -> e.name + (e.mode.equals("40000") ? "/" : ""));
-    private static List<Entry> tree(byte[] bytes) {
+    static List<Entry> tree(byte[] bytes) {
         var entries = new ArrayList<Entry>();
         int offset = 0;
         while (offset < bytes.length) {

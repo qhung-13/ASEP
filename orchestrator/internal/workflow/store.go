@@ -176,6 +176,13 @@ func (s *Store) Admit(ctx context.Context, c Admission) (AdmissionReceipt, error
 }
 
 func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInventory, profile *syntheticProfile) (AdmissionReceipt, error) {
+	return s.admitAt(ctx, c, inventory, profile, "INVESTIGATING", "MANUAL")
+}
+func (s *Store) admitAt(ctx context.Context, c Admission, inventory *executionInventory, profile *syntheticProfile, initialStage, trigger string) (AdmissionReceipt, error) {
+	if !((initialStage == "INVESTIGATING" && trigger == "MANUAL") || (initialStage == "IMPLEMENTING" && trigger == "CONTROLLER_PROBE" && inventory == nil && profile == nil)) {
+		return AdmissionReceipt{}, ErrDeliveryDenied
+	}
+
 	if err := c.validate(); err != nil {
 		return AdmissionReceipt{}, err
 	}
@@ -213,21 +220,28 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 		return AdmissionReceipt{}, err
 	}
 	defer tx.Rollback()
+	if trigger == "CONTROLLER_PROBE" {
+		expiry, denied := lockDeliveryPolicy(ctx, tx, c.PolicyID, c.PolicyEpoch)
+		var now time.Time
+		if denied != nil || tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now) != nil || !now.Before(expiry) {
+			return AdmissionReceipt{}, ErrDeliveryDenied
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO orchestration.workflow_runs(
           run_id,command_id,command_payload_sha256,subject_key,actor_id,
           jira_site_id,jira_project_id,jira_issue_id,gitlab_project_id,
           repository_base_sha,target_branch,observed_target_head_sha,
-          source_fingerprint_sha256,policy_id,policy_epoch,budget_limit
-        ) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+          source_fingerprint_sha256,policy_id,policy_epoch,budget_limit,trigger_kind
+        ) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		runID, c.CommandID, canonicalDigest, c.SubjectKey, c.ActorID, c.JiraSiteID,
 		c.JiraProjectID, c.JiraIssueID, c.GitLabProjectID, c.RepositoryBaseSHA,
 		c.TargetBranch, c.ObservedTargetHeadSHA, c.SourceFingerprintSHA256,
-		c.PolicyID, c.PolicyEpoch, c.BudgetLimit)
+		c.PolicyID, c.PolicyEpoch, c.BudgetLimit, trigger)
 	if err != nil {
 		_ = tx.Rollback()
 		if isUnique(err) {
-			r, lookup := s.lookupConflict(ctx, c.CommandID, canonicalDigest)
+			r, lookup := s.lookupConflictAt(ctx, c.CommandID, canonicalDigest, initialStage)
 			if lookup == nil && inventory != nil {
 				want := *inventory
 				want.RunID = r.RunID
@@ -259,21 +273,21 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO orchestration.stage_attempts(
           attempt_id,run_id,stage,semantic_attempt_no
-        ) VALUES ($1::uuid,$2::uuid,'INVESTIGATING',1)`, attemptID, runID)
+        ) VALUES ($1::uuid,$2::uuid,$3,1)`, attemptID, runID, initialStage)
 	if err != nil {
 		return AdmissionReceipt{}, fmt.Errorf("insert stage attempt: %w", err)
 	}
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO orchestration.task_deliveries(
           task_id,run_id,attempt_id,stage
-        ) VALUES ($1::uuid,$2::uuid,$3::uuid,'INVESTIGATING')`, taskID, runID, attemptID)
+        ) VALUES ($1::uuid,$2::uuid,$3::uuid,$4)`, taskID, runID, attemptID, initialStage)
 	if err != nil {
 		return AdmissionReceipt{}, fmt.Errorf("enqueue first task: %w", err)
 	}
 	updated, err := tx.ExecContext(ctx, `
         UPDATE orchestration.workflow_runs
-        SET state='INVESTIGATING',run_version=1,updated_at=clock_timestamp()
-        WHERE run_id=$1::uuid AND state='ADMITTED' AND run_version=0`, runID)
+        SET state=$2,run_version=1,updated_at=clock_timestamp()
+        WHERE run_id=$1::uuid AND state='ADMITTED' AND run_version=0`, runID, initialStage)
 	if err != nil {
 		return AdmissionReceipt{}, fmt.Errorf("activate admitted run: %w", err)
 	}
@@ -284,7 +298,7 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO orchestration.workflow_transitions(
           transition_id,run_id,attempt_id,from_state,to_state,prior_run_version
-        ) VALUES($1::uuid,$2::uuid,$3::uuid,'ADMITTED','INVESTIGATING',0)`, transitionID, runID, attemptID)
+        ) VALUES($1::uuid,$2::uuid,$3::uuid,'ADMITTED',$4,0)`, transitionID, runID, attemptID, initialStage)
 	if err != nil {
 		return AdmissionReceipt{}, fmt.Errorf("initial transition: %w", err)
 	}
@@ -293,7 +307,7 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 		AttemptID string `json:"attempt_id"`
 		TaskID    string `json:"task_id"`
 		Stage     string `json:"stage"`
-	}{runID, attemptID, taskID, "INVESTIGATING"}
+	}{runID, attemptID, taskID, initialStage}
 	body, err := json.Marshal(event)
 	if err != nil {
 		return AdmissionReceipt{}, err
@@ -323,15 +337,18 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 }
 
 func (s *Store) lookupConflict(ctx context.Context, commandID, digest string) (AdmissionReceipt, error) {
+	return s.lookupConflictAt(ctx, commandID, digest, "INVESTIGATING")
+}
+func (s *Store) lookupConflictAt(ctx context.Context, commandID, digest, stage string) (AdmissionReceipt, error) {
 	var receipt AdmissionReceipt
 	var priorDigest string
 	err := s.db.QueryRowContext(ctx, `
         SELECT r.run_id::text,a.attempt_id::text,t.task_id::text,r.command_payload_sha256
         FROM orchestration.workflow_runs r
         JOIN orchestration.stage_attempts a ON a.run_id=r.run_id
-          AND a.stage='INVESTIGATING' AND a.semantic_attempt_no=1
+          AND a.stage=$2 AND a.semantic_attempt_no=1
         JOIN orchestration.task_deliveries t ON t.attempt_id=a.attempt_id
-        WHERE r.command_id=$1::uuid`, commandID).Scan(
+        WHERE r.command_id=$1::uuid`, commandID, stage).Scan(
 		&receipt.RunID, &receipt.AttemptID, &receipt.TaskID, &priorDigest)
 	if err == nil {
 		if priorDigest == digest {

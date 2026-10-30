@@ -299,15 +299,19 @@ func (s *Store) AcceptDeliveryOutcome(ctx context.Context, envelope DeliveryOutc
 		}
 		return nil
 	}
-	clean := (state == "DELIVERY_PENDING" && version == request.RunVersion || state == "COMPLETED_DRAFT_MR" && version == request.RunVersion+1) && policy == request.PolicyID && epoch == request.PolicyEpoch
-	// Serialize revocation with completion; an unavailable policy only removes
-	// completion eligibility, never discards already observed external effects.
-	expiry, policyErr := lockDeliveryPolicy(ctx, tx, policy, epoch)
-	var proofCurrent bool
-	if tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.delivery_review_evidence WHERE evidence_id=$1::uuid AND revoked_at IS NULL AND expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM orchestration.controlled_candidate_evidence WHERE evidence_id=$1::uuid AND (revoked_at IS NOT NULL OR expires_at<=clock_timestamp())) AND clock_timestamp()<$2::timestamptz`, evidenceID, expiry).Scan(&proofCurrent) != nil {
-		return ErrDeliveryDenied
+	bound := policy == request.PolicyID && epoch == request.PolicyEpoch
+	// Already accepted completion is historical authority, not a fresh write
+	// grant. Later read-only observations must not invent a race merely because
+	// that original policy/proof expired or was revoked after completion.
+	clean := state == "COMPLETED_DRAFT_MR" && version == request.RunVersion+1 && bound
+	if state == "DELIVERY_PENDING" {
+		expiry, policyErr := lockDeliveryPolicy(ctx, tx, policy, epoch)
+		var proofCurrent bool
+		if tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.delivery_review_evidence WHERE evidence_id=$1::uuid AND revoked_at IS NULL AND expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM orchestration.controlled_candidate_evidence WHERE evidence_id=$1::uuid AND (revoked_at IS NOT NULL OR expires_at<=clock_timestamp())) AND clock_timestamp()<$2::timestamptz`, evidenceID, expiry).Scan(&proofCurrent) != nil {
+			return ErrDeliveryDenied
+		}
+		clean = bound && version == request.RunVersion && policyErr == nil && proofCurrent
 	}
-	clean = clean && policyErr == nil && proofCurrent
 	sticky = sticky || c.ResidualRace || (!clean && (c.PushClaimed || c.MRClaimed))
 	if c.LastConfirmedPushHead != nil {
 		head = sql.NullString{String: *c.LastConfirmedPushHead, Valid: true}

@@ -52,7 +52,7 @@ final class InternalDeliveryHttp implements AutoCloseable {
         CompletableFuture<HttpResponse<byte[]>> pending=null;
         try {
             pending=client.sendAsync(request,info->{
-                if(info.statusCode()==204)return new BoundedBody();
+                if(info.statusCode()==204){if(!path.equals("/internal/v1/delivery-intents/claim"))throw denied();return new BoundedBody();}
                 if(info.statusCode()!=200 || !info.headers().firstValue("Content-Type").orElse("").matches("(?i)application/json(?:;\\s*charset=utf-8)?")
                         || !info.headers().firstValue("Content-Encoding").orElse("identity").equalsIgnoreCase("identity")
                         || info.headers().firstValueAsLong("Content-Length").orElse(0)>8192) throw denied();

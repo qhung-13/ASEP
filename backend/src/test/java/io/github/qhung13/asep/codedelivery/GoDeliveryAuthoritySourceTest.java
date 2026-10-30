@@ -100,6 +100,24 @@ class GoDeliveryAuthoritySourceTest {
         }
         assertEquals(7,requests.get());assertNull(errors.get());
     }
+    @Test void messageAckMustBeExplicitAndNoMessageIsOnlyValidForClaim()throws Exception{
+        var serverIdentity=identity("ack-server","ip:127.0.0.1");var clientIdentity=identity("ack-client","uri:spiffe://asep.local/code-delivery");
+        var serverContext=context(serverIdentity,clientIdentity.getCertificate("ack-client"));var clientContext=context(clientIdentity,serverIdentity.getCertificate("ack-server"));
+        String pin=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(serverIdentity.getCertificate("ack-server").getEncoded()));
+        var body=new AtomicReference<>("{\"accepted\":true}");var status=new AtomicInteger(200);var errors=new AtomicReference<Throwable>();var requests=new AtomicInteger();
+        var executor=Executors.newCachedThreadPool();var server=HttpsServer.create(new InetSocketAddress("127.0.0.1",0),0);server.setExecutor(executor);
+        server.setHttpsConfigurator(new HttpsConfigurator(serverContext){@Override public void configure(com.sun.net.httpserver.HttpsParameters p){var settings=serverContext.getDefaultSSLParameters();settings.setProtocols(new String[]{"TLSv1.3"});settings.setNeedClientAuth(true);p.setSSLParameters(settings);}});
+        server.createContext("/",exchange->{try{
+            requests.incrementAndGet();assertEquals("POST",exchange.getRequestMethod());assertTrue(exchange.getRequestBody().readNBytes(8193).length<=8192);
+            exchange.getResponseHeaders().set("Content-Type","application/json");int code=status.get();if(code==204){exchange.sendResponseHeaders(204,-1);return;}byte[] selected=body.get().getBytes(StandardCharsets.US_ASCII);exchange.sendResponseHeaders(code,selected.length);exchange.getResponseBody().write(selected);
+        }catch(Throwable failure){errors.compareAndSet(null,failure);}finally{exchange.close();}});server.start();
+        try(var messages=new GoDeliveryMessages(URI.create("https://127.0.0.1:"+server.getAddress().getPort()),clientContext,pin,Duration.ofSeconds(2))){
+            UUID message=UUID.randomUUID(),token=UUID.randomUUID();assertDoesNotThrow(()->messages.acknowledge(message,"a".repeat(64),token));
+            for(String invalid:new String[]{"{\"accepted\":false}","{}","{\"accepted\":true,\"authority\":true}","[]"}){body.set(invalid);assertThrows(DeliveryException.class,()->messages.acknowledge(message,"a".repeat(64),token));}
+            status.set(204);assertThrows(DeliveryException.class,()->messages.acknowledge(message,"a".repeat(64),token));assertNull(messages.claim());
+        }finally{server.stop(5);executor.shutdown();assertTrue(executor.awaitTermination(5,TimeUnit.SECONDS));}
+        assertEquals(7,requests.get());assertNull(errors.get());
+    }
     @Test void noInsecureOriginOrUnboundedDeadline() throws Exception {
         var context=SSLContext.getDefault();
         assertThrows(IllegalStateException.class,()->new GoDeliveryAuthoritySource(URI.create("http://127.0.0.1:1234"),UUID.randomUUID(),context,"a".repeat(64),Duration.ofSeconds(1)));

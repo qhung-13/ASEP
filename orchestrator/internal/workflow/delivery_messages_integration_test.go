@@ -214,7 +214,15 @@ func TestDeliveryMessagesNewerDriftReopensReconciliationWithoutFalseRaceOnUnchan
 	if f.store.db.QueryRowContext(ctx, `SELECT r.state,o.residual_race FROM orchestration.workflow_runs r JOIN orchestration.delivery_observations o ON o.operation_id=$2::uuid WHERE r.run_id=$1::uuid`, f.request.RunID, f.request.OperationID).Scan(&state, &race) != nil || state != "COMPLETED_DRAFT_MR" || race {
 		t.Fatal("unchanged higher revision invented a race")
 	}
-	changed := confirmedCallback(f, 7)
+	authority := deliveryAuthorityDatabase(t, "asep_orch_authority", "ASEP_DELIVERY_AUTHORITY_TEST_PASSWORD")
+	if _, err := authority.ExecContext(ctx, `UPDATE orchestration.delivery_policies SET enabled=false WHERE policy_id=$1`, f.request.PolicyID); err != nil {
+		t.Fatal("post-completion revocation failed")
+	}
+	sendCallback(t, f, confirmedCallback(f, 7))
+	if f.store.db.QueryRowContext(ctx, `SELECT r.state,o.residual_race FROM orchestration.workflow_runs r JOIN orchestration.delivery_observations o ON o.operation_id=$2::uuid WHERE r.run_id=$1::uuid`, f.request.RunID, f.request.OperationID).Scan(&state, &race) != nil || state != "COMPLETED_DRAFT_MR" || race {
+		t.Fatal("historical completion became a race after later revocation")
+	}
+	changed := confirmedCallback(f, 8)
 	changed.MergeRequest = "BLOCKED"
 	changed.ResidualRace = true
 	sendCallback(t, f, changed)

@@ -3,8 +3,11 @@
 Owner priority: finish all safely implementable repository code and local
 verification before Safe-CI enrollment, credential work or deployment verification.
 VN-T14 is the only active ticket. Real GitLab acceptance remains BLOCKED and the
-ticket is not DONE. Local implementation assessment is IN PROGRESS until the
-validation and completeness audit below are finished.
+ticket is not DONE.
+
+**Local Implementation: COMPLETE** for the fixed VN-T14 single-file probe scope.
+**Real GitLab Acceptance: BLOCKED.** No real deployment or GitLab acceptance
+activity was started during this execution.
 
 ## Baseline and provenance
 
@@ -127,6 +130,46 @@ was used only for navigation; findings were checked against actual source/tests.
 
 All blocking findings from the focused review are resolved and local validation
 is complete. No additional safely implementable component gap was found in the
-bounded VN-T14 acceptance matrix. Final checkpoint identity and the concise Owner
-handoff will be recorded after the local commit and post-commit assessment.
+bounded VN-T14 acceptance matrix. Local code checkpoint: `c15b022`.
 
+## Final local assessment and Owner handoff
+
+The post-checkpoint review found no new code finding. The shared production assembly
+is exercised through actual JDBC and mTLS/fake-GitLab success/fault/restart cases;
+there is no remaining substituted all-gates-PASS path in that cross-process
+fixture. Controller/issuer/human identities in local tests remain explicitly
+synthetic; meaningful probe tests ran in the actual restricted Docker child.
+No agent output, checksum or fixture approval is promoted to real operational
+identity or independent live authorization.
+
+The final review also identified one report-only trailing blank line after the
+checkpoint; it is removed in this assessment commit. Final baseline-to-worktree
+and staged whitespace checks pass after the correction. Code was unchanged after
+the successful suites; the final commit only records this assessment/handoff.
+
+Remaining code gaps: **none identified within the approved bounded probe scope**.
+Conservative limits remain explicit: unsupported Git wire/incomplete MR inventory
+fails closed; unresolved verifier ownership/absence and unpublished controller
+staging require protected inspection, never global deletion or invented PASS.
+Those are safe stop/reconciliation outcomes, not hidden live readiness claims.
+Arbitrary AI candidate quality and Jira investigation/planning are outside VN-T14.
+
+Next Owner gate, after review of local commits and this report:
+
+1. Separately authorize protected host identities, reviewed artifact/config install,
+   schema/role provisioning and PKI/network/filesystem isolation. Execute positive
+   and negative checks as the actual service/agent identities, including restart.
+2. Obtain complete current Owner-visible Safe-CI/inheritance and exact candidate CI
+   evidence; preserve unknown visibility instead of elevating the Developer writer.
+3. Resolve the prior token's revocation/expiry disposition, then separately authorize
+   fresh scoped write and independent read credential provisioning and lifecycle.
+4. Obtain a real sealed probe/independent proof, current Go authorization, genuine
+   human grant and exact-operation permit. Separately authorize the live success/
+   failure window; observe real branch/MR identity, durable outcomes and CI.
+
+No enrollment UI/API inventory, live token use, GitLab write, service installation,
+privileged host change, production certificate deployment, GitHub push or merge
+was performed. VN-T14 remains active and NOT DONE until real acceptance.
+The final tracked tree/index are checked clean after both local commits; the seven
+original untracked spec files remain untouched. Current commit IDs are available
+with `git log -2 --oneline`; no future clean state is inferred from this prose.

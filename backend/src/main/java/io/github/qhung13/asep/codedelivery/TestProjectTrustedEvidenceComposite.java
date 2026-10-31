@@ -7,8 +7,8 @@ import java.util.Set;
 import static io.github.qhung13.asep.codedelivery.TestProjectDeliveryGate.*;
 
 /**
- * VN-T14 local-only composition of exactly two independently validated facts.
- * No live authority, credentials, Spring wiring or GitLab writer.
+ * VN-T14 composition of exactly two independently validated facts.
+ * Other enrollment requirements remain separate; no Spring activation or GitLab writer is created here.
  */
 public final class TestProjectTrustedEvidenceComposite
         implements TrustedEvidenceVerifier {

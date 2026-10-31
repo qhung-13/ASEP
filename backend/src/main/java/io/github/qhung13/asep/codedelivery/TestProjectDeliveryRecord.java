@@ -33,7 +33,7 @@ public record TestProjectDeliveryRecord(TestProjectDeliveryRequest request, Stat
         return push == State.CONFIRMED && mergeRequest == State.CONFIRMED && !residualRace;
     }
 
-    /** Trusted Java-to-Go observation; receiving it never authorizes a Go state transition. */
+    /** Trusted Java-to-Go observation; Go separately validates current workflow authority before recording completion. */
     public record Callback(UUID callbackId, UUID operationId, UUID runId, long expectedRunVersion,
             String requestHash, long revision, State push, State mergeRequest, boolean pushClaimed,
             boolean mrClaimed, String lastConfirmedPushHead, List<Long> knownMrIids, boolean residualRace) {

@@ -140,14 +140,18 @@ ASEP_DELIVERY_TEST_MIGRATION_PASSWORD="$migration_password" \
 phase='offline native Git writer and durable inbox/outcome integration'
 ASEP_DELIVERY_TEST_ISSUER_PASSWORD="$issuer_password" \
  run_bounded 180 ./mvnw "${maven_options[@]}" -Dasep.delivery.postgres=true \
- -Dtest=DeliveryWriterPostgresTest test
+ -Dtest=DeliveryWriterPostgresTest,ProtectedDeliveryExecutorPostgresTest test
 python3 - <<'PYWRITER'
 from pathlib import Path
 import xml.etree.ElementTree as ET
 r=ET.parse(Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.DeliveryWriterPostgresTest.xml')).getroot()
-assert int(r.get('tests','0'))==10
+assert int(r.get('tests','0'))==11
 assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
-print('Native Git/API writer + actual JDBC/coordinator/inbox/callback tests: 10/10 PASS')
+print('Native Git/API writer + actual JDBC/coordinator/inbox/callback tests: 11/11 PASS')
+r=ET.parse(Path('target/surefire-reports/TEST-io.github.qhung13.asep.codedelivery.ProtectedDeliveryExecutorPostgresTest.xml')).getroot()
+assert int(r.get('tests','0'))==13
+assert all(int(r.get(k,'0'))==0 for k in ('errors','failures','skipped'))
+print('Protected delivery assembly + enrollment/credential/recovery tests: 13/13 PASS')
 PYWRITER
 
 phase='issuer integration test discovery audit'

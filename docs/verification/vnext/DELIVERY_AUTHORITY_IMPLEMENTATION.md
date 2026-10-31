@@ -5,6 +5,22 @@ operator enrollment, Safe-CI enrollment or live acceptance record. Project
 87786140 (`qhung-13/asep-m01-sandbox`), source `test/vn-t14/<operation-id>`,
 protected `main`, Draft MR only remain the fixed scope.
 
+> Continuation, 2026-10-30: the repository now includes the probe controller,
+> offline-tested Git smart-HTTP/Draft MR adapter, authenticated intent/outcome
+> contracts and protected runtime/deployment templates. See
+> [remaining local implementation report](VN-T14_REMAINING_LOCAL_IMPLEMENTATION_2026-10-30.md)
+> and [deployment preparation](../../../deploy/delivery/README.md).
+> The operator consumes the controller's indexed atomic batch; the manual receipt
+> layout described below is historical preparation guidance. Later sections listing
+> missing writer/runtime code describe the 2026-10-29 checkpoint. Protected host
+> deployment, complete Safe-CI enrollment, credentials and live acceptance remain
+> independently blocked; this continuation does not approve an ADR or enroll a host.
+
+> Owner priority, 2026-10-31: complete all safely implementable VN-T14 code and
+> local verification before Safe-CI enrollment or protected deployment verification.
+> The [current local assessment](VN-T14_LOCAL_COMPLETENESS_2026-10-31.md) separates
+> repository completeness from real acceptance. VN-T14 is the only active ticket.
+
 ## Restricted human operator
 
 `OwnerApprovalCommand` is an explicit Java 21 command; it is not a Spring bean,

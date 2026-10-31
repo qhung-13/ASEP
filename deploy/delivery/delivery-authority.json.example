@@ -1,0 +1,13 @@
+{
+  "bind": "127.0.0.1:9443",
+  "serviceUid": 0, "agentUid": 0, "controllerUid": 0, "executorUid": 0, "operatorUid": 0,
+  "binarySha256": "REPLACE_WITH_REVIEWED_BINARY_SHA256",
+  "serverCertificate": "/etc/asep/pki/authority.crt",
+  "serverCertificateSha256": "REPLACE_WITH_REVIEWED_CERTIFICATE_FILE_SHA256",
+  "serverKey": "/var/lib/asep/authority/private/server.key",
+  "clientCa": "/etc/asep/pki/service-clients-ca.crt",
+  "clientCaSha256": "REPLACE_WITH_REVIEWED_CA_FILE_SHA256",
+  "databaseCa": "/etc/asep/pki/postgres-ca.crt",
+  "runtimeDsnFile": "/var/lib/asep/authority/private/runtime.dsn",
+  "issuerDsnFile": "/var/lib/asep/authority/private/issuer.dsn"
+}

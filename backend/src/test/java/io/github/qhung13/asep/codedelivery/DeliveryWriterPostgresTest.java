@@ -56,6 +56,12 @@ class DeliveryWriterPostgresTest {
         }
         @Override public void close()throws Exception{http.close();remote.close();}
     }
+    @Test void protectedRuntimeDatabaseGuardRequiresDomainRoleWithoutAssumingColocatedSchemas()throws Exception{
+        // Existing owned Java fixture has no orchestration schema. A separate
+        // database must be permitted; any existing workflow schema must be denied.
+        try(var db=database.getConnection();var query=db.createStatement();var row=query.executeQuery(ProtectedDeliveryRuntime.RUNTIME_IDENTITY_SQL)){assertTrue(row.next());assertTrue(row.getBoolean(1));}
+        try(var db=DeliveryDatabaseFixture.issuer().getConnection();var query=db.createStatement();var row=query.executeQuery(ProtectedDeliveryRuntime.RUNTIME_IDENTITY_SQL)){assertTrue(row.next());assertFalse(row.getBoolean(1));}
+    }
     @Test void actualWriterAndDurableLedgerCompleteOnceAcrossRestart()throws Exception{
         try(var s=new Scenario(true)){var result=s.coordinator.runOnce(s.request);assertTrue(result.exactRemoteCandidateObserved());assertEquals(Set.of(1L),result.knownMrIids());
             assertEquals(result,new JdbcTestProjectDeliveryLedger(database).find(s.request.operationId()));

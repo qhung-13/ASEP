@@ -48,7 +48,8 @@ final class NativeGitLabFixture implements AutoCloseable {
                 }
                 exchange.getResponseHeaders().set("Content-Type","application/json");
                 if(method.equals("GET")&&path.equals("/api/v4/projects/87786140")){
-                    send(exchange,200,json(Map.of("id",wrongProject?42:87786140,"path_with_namespace","qhung-13/asep-m01-sandbox","default_branch","main","archived",false)));return;
+                    send(exchange,200,json(Map.of("id",wrongProject?42:87786140,"path_with_namespace","qhung-13/asep-m01-sandbox","default_branch","main","archived",false,
+                            "visibility","private","builds_access_level","disabled","shared_runners_enabled",false,"permissions",Map.of("project_access",Map.of("access_level",30)))));return;
                 }
                 if(method.equals("GET")&&path.startsWith("/api/v4/projects/87786140/repository/branches/")){
                     String branch=java.net.URLDecoder.decode(path.substring(path.lastIndexOf('/')+1),StandardCharsets.UTF_8);

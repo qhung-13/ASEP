@@ -1,0 +1,105 @@
+{
+  "status": "BLOCKED_NOT_VERIFIED",
+  "projectId": 87786140,
+  "repositoryPath": "qhung-13/asep-m01-sandbox",
+  "sourcePattern": "test/vn-t14/<operation-id>",
+  "targetBranch": "main",
+  "liveWritesEnabled": false,
+  "facts": {
+    "project-namespace-permissions": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "inherited-group-compliance": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "project-group-instance-runners": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "runner-execution-protection": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "variable-metadata-all-levels": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "candidate-ci-includes": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "pipeline-security-policies": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "auto-devops": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "protected-branches": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "environments-deployment-capabilities": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "hooks-integrations-deploy-keys-tokens": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "job-token-capabilities": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "source-push-ci-behavior": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "draft-mr-ci-behavior": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "isolated-controller-verifier": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "isolated-operator-executor": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "credential-lifecycle-revocation-plan": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    },
+    "controlled-fault-window": {
+      "status": "UNKNOWN",
+      "evidenceSha256": null,
+      "provenance": null
+    }
+  },
+  "notes": [
+    "403, missing pagination or an omitted setting is UNKNOWN.",
+    "No credential values or variable values belong in evidence.",
+    "A permit must bind the full canonical request hash and existing Safe-CI profile, including exact candidate CI."
+  ]
+}

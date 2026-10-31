@@ -16,7 +16,7 @@ import java.util.UUID;
 
 /** Local preparation only: no remote client, credentials, mutation, receipt issuer or application wiring.
  * Artifacts/receipts must come from protected trusted controllers, never request JSON or agent flags.
- * These ports have no configured live implementation. A Prepared value is NOT write authorization.
+ * Protected controller/runtime wiring supplies these ports explicitly. A Prepared value is NOT write authorization.
  */
 public final class TestProjectDeliveryPreparation {
     public enum ObjectType { COMMIT, TREE, BLOB }

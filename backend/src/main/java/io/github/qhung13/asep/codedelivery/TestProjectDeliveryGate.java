@@ -8,7 +8,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
-/** VN-T14-only pre-write validation. No live verifier, credential source, writer or activation is wired.
+/** VN-T14-only pre-write validation. Default startup has no live activation;
+ * protected installed runtime wiring must establish every independent capability.
  * Synthetic VN-T13 DeliveryIntent/DeliveryChecks are deliberately not accepted by this API.
  */
 public final class TestProjectDeliveryGate {
@@ -27,7 +28,7 @@ public final class TestProjectDeliveryGate {
         public Evidence { verified = Set.copyOf(verified); }
     }
     /** Trusted host must verify the actual current policy, grant, enrollment and protected receipts.
-     * There is no live implementation. An incoming reference or all-verified flag is not proof.
+     * Protected runtime configuration and enrollment are mandatory. An incoming reference or all-verified flag is not proof.
      */
     public interface TrustedEvidenceVerifier {
         Evidence verify(TestProjectDeliveryRequest request, Inspection inspection);

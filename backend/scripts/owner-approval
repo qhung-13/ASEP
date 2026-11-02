@@ -1,0 +1,7 @@
+#!/bin/sh
+# Install root-owned and non-writable at /usr/local/sbin/asep-owner-approval.
+# Do not run from an agent-writable checkout or retain ambient JVM injection options.
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 \
+  /usr/lib/jvm/java-21-openjdk-amd64/bin/java -XX:-HeapDumpOnOutOfMemoryError \
+  -Dloader.main=io.github.qhung13.asep.codedelivery.OwnerApprovalCommand \
+  -cp /opt/asep/owner-approval/asep.jar org.springframework.boot.loader.launch.PropertiesLauncher "$@"

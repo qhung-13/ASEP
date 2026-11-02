@@ -9,7 +9,8 @@
 | [MVP requirements](requirements/vnext/MVP_SCOPE.md) | Bounded Jira→verified Draft MR outcome; existing M01 requirements still authoritative for review/publication |
 | [System architecture](architecture/vnext/SYSTEM_ARCHITECTURE.md) | Application (Java), Go Orchestrator and Python/OpenHands Agent Platform |
 | [Execution contracts](architecture/vnext/EXECUTION_CONTRACTS_AND_GATES.md) | Candidate admission/state/evidence/sandbox/Code Delivery contracts; future gates and tests OPEN |
-| [ADRs](architecture/adr/vnext/ADR-VN-01-COMPONENT-BOUNDARIES.md) | vNext-specific ADR-VN-01..04; ADR-001/002 historical decisions preserved |
+| [ADRs](architecture/adr/vnext/ADR-VN-01-COMPONENT-BOUNDARIES.md) | vNext component/authority ADRs VN-01..04; deployment proposal VN-05 listed separately; ADR-001/002 historical decisions preserved |
+| [Hybrid K3s foundation amendment](architecture/adr/vnext/ADR-VN-05-HYBRID-K3S-DEPLOYMENT.md) | PROPOSED; Owner-selected platform direction, concrete plan pending review; protected VN-T14 host/Docker topology unchanged; no installation authorization |
 | [Verification](verification/vnext/TRACEABILITY_AND_RISKS.md) | VNX-V01..15 and fault plans OPEN; M01 V-01..14 remain OPEN |
 | [Roadmap proposal](governance/vnext/ROADMAP_PROPOSAL.md) | P-01 priority, security/contract prerequisites; Project Control ticket mapping pending |
 | [Adoption checklist](governance/vnext/ADOPTION_CHECKLIST.md) | Docs-vs-execution gate separation, live Git diff required |

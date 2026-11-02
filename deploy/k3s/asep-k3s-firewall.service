@@ -1,0 +1,15 @@
+[Unit]
+Description=ASEP single-node K3s host INPUT guard
+# Ordering only; does not enable/start either global firewall manager.
+After=nftables.service ufw.service
+Before=k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/asep-k3s-firewall apply
+# No ExecStop: stopping this unit never removes the protection.
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

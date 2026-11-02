@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Install root-owned outside the checkout only after Owner review. No privilege
+# elevation: Java verifies the real UID and root-pinned installation itself.
+set -euo pipefail
+ulimit -c 0
+[[ $# == 2 ]] || { echo 'Protected delivery command requires exactly two arguments.' >&2; exit 2; }
+case "$1" in check|prepare|cancel|once|reconcile) ;; *) echo 'Unsupported protected command.' >&2; exit 2 ;; esac
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC \
+ /usr/bin/java -XX:-HeapDumpOnOutOfMemoryError \
+ -Dloader.main=io.github.qhung13.asep.codedelivery.DeliveryRuntimeCommand \
+ -cp /opt/asep/delivery/asep-backend.jar org.springframework.boot.loader.launch.PropertiesLauncher "$1" "$2"

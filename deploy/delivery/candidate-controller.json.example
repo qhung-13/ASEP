@@ -1,0 +1,20 @@
+{
+  "role": "candidate-controller",
+  "serviceUid": 0, "agentUid": 0, "controllerUid": 0, "operatorUid": 0, "executorUid": 0, "orchestratorUid": 0,
+  "installedJarSha256": "REPLACE_WITH_REVIEWED_JAR_SHA256",
+  "goOrigin": "https://127.0.0.1:9443",
+  "goServerCertificateSha256": "REPLACE_WITH_SERVER_LEAF_DER_SHA256",
+  "clientCertificate": "/etc/asep/pki/controller.crt",
+  "clientKey": "/var/lib/asep/controller/private/client.key",
+  "authorityCa": "/etc/asep/pki/service-server-ca.crt",
+  "evidenceRoot": "/var/lib/asep/controller/evidence",
+  "baseObjectsRoot": "/var/lib/asep/base-objects",
+  "verifierJobsRoot": "/var/lib/asep/controller/verification-jobs",
+  "profileSha256": "REPLACE_WITH_APPROVED_PROFILE_SHA256",
+  "harnessSha256": "REPLACE_WITH_SAME_REVIEWED_JAR_SHA256",
+  "imageSha256": "REPLACE_WITH_PRELOADED_IMAGE_ID_SHA256",
+  "minimumTests": 2, "maximumReceiptAgeSeconds": 300,
+  "databaseUrl": null, "databasePassword": null, "databaseCa": null,
+  "readCredential": null, "writeCredential": null, "enrollmentRoot": null,
+  "liveWritesEnabled": false
+}

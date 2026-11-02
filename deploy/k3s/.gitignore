@@ -1,0 +1,11 @@
+# Preserved concrete host inputs and their original review manifest
+/config.yaml
+/firewall.nft
+/OWNER-REVIEW.SHA256
+# Downloaded payloads, generated caches and local observations
+/k3s
+/install.sh
+/k3s-airgap-images-amd64.tar.zst
+/sha256sum-amd64.txt
+__pycache__/
+*.py[cod]

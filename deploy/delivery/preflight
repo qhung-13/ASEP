@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Informational dry-run only: no secret reads, network, Docker, installs or SQL.
+set -euo pipefail
+[[ "${1:-}" == --dry-run && $# == 1 ]] || { echo 'Only --dry-run is supported; no deployment action exists.' >&2; exit 2; }
+cat <<'PLAN'
+BLOCKED / NOT DEPLOYED: templates contain invalid UID/hash placeholders.
+Owner review order:
+1. Review local commits, artifacts, migrations and exact test evidence.
+2. Provision distinct agent, controller, verifier, operator, executor and Go identities.
+3. Install reviewed immutable JAR/binary, root-controlled configs, private keys and isolated DB roles.
+4. Validate filesystem/socket/network boundaries with negative tests as each real identity.
+5. Deploy separate server/client trust roots and exact URI SANs; exercise invalid/expired identity denial.
+6. Run protected check commands without credentials/network, then controlled evidence and authority checks.
+7. Collect complete Owner-visible read-only Safe-CI/inheritance evidence for the exact sealed candidate.
+8. Obtain separate explicit authorization for scoped credentials and the exact live fault window.
+9. Keep liveWritesEnabled=false until the independent evidence, exact DB grant and operation permit exist.
+10. Execute and observe live delivery/faults only after new explicit Owner authorization.
+No host, database, GitLab or GitHub mutation has been performed by this dry-run.
+PLAN

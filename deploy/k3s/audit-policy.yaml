@@ -1,0 +1,9 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  - level: None
+    nonResourceURLs: ["/healthz*", "/readyz*", "/livez*"]
+  # Never log Secret request/response bodies, tokens or ordinary workload payloads.
+  - level: Metadata

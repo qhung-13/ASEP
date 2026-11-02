@@ -1,0 +1,16 @@
+# Read-only event baseline. Does not create or run a pipeline.
+query VNT14ReadOnlyEventBaseline {
+  currentUser { username }
+  project(fullPath: "qhung-13/asep-m01-sandbox") {
+    id fullPath
+    pipelineCounts { all pending running finished }
+    pipelineSchedules(first: 100) {
+      nodes { id active ref }
+      pageInfo { hasNextPage endCursor }
+    }
+    pipelineExecutionSchedulePolicies(first: 100, relationship: INHERITED, includeUnscoped: true) {
+      nodes { name enabled }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}

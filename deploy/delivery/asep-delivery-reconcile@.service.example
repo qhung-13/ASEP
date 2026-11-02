@@ -1,0 +1,20 @@
+# Read-only GitLab recovery; instance is one exact UUID. No auto-start target.
+[Unit]
+Description=ASEP protected delivery reconciliation
+ConditionPathExists=/etc/asep/delivery-executor.json
+[Service]
+Type=oneshot
+User=asep-executor
+Group=asep-evidence-readers
+ExecStart=/usr/local/libexec/asep-delivery reconcile %i
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX
+# Owner must separately install outbound allowlisting; public DNS/IP ranges are
+# not invented here. Do not deploy this template as proof of network isolation.

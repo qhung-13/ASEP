@@ -1,0 +1,29 @@
+# Review template only. No install/enable/start is performed by this repository.
+[Unit]
+Description=ASEP protected internal delivery authority
+ConditionPathExists=/etc/asep/delivery-authority.json
+After=network.target
+[Service]
+Type=simple
+User=asep-orchestrator
+Group=asep-orchestrator
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC /opt/asep/delivery/bin/asep-orchestrator serve-delivery
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+CapabilityBoundingSet=
+[Install]
+# Deliberately no WantedBy: activation is an Owner-reviewed deployment action.

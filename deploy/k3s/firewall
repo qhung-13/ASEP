@@ -1,0 +1,149 @@
+#!/usr/bin/python3 -I
+"""Reference-profile fixed-path root firewall gate; example0/192.0.2.10 need separate review. Offline tests import pure functions; never install here."""
+import argparse
+import copy
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+
+TABLE = 'asep_k3s_guard'
+NODE_IP = '192.0.2.10'
+NODE_IFACE = 'example0'
+POD_CIDR = '10.42.0.0/16'
+HELPER = Path('/usr/local/libexec/asep-k3s-firewall')
+RULES = Path('/etc/asep-k3s-firewall/firewall.nft')
+BASELINE = Path('/etc/asep-k3s-review/SHA256SUMS')
+NFT = '/usr/sbin/nft'
+INSTALLED = {
+    'firewall': HELPER, 'firewall.nft.example': RULES,
+    'asep-k3s-firewall.service': Path('/etc/systemd/system/asep-k3s-firewall.service'),
+    'k3s-firewall.conf': Path('/etc/systemd/system/k3s.service.d/20-asep-firewall.conf'),
+    'config.yaml.example': Path('/etc/rancher/k3s/config.yaml'),
+}
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def match(left, right):
+    return {'match': {'op': '==', 'left': left, 'right': right}}
+
+
+def expected_rules():
+    interface = lambda name: match({'meta': {'key': 'iifname'}}, name)
+    port = lambda protocol, value: match({'payload': {'protocol': protocol, 'field': 'dport'}}, value)
+    tcp_ports = {'set': [6443, 10250]}
+    return [
+        ('asep:local-tcp', [interface('lo'), port('tcp', tcp_ports), {'counter': None}, {'accept': None}]),
+        ('asep:local-overlay', [interface('lo'), port('udp', 8472), {'counter': None}, {'accept': None}]),
+        ('asep:cni-api', [interface('cni0'),
+                          match({'payload': {'protocol': 'ip', 'field': 'saddr'}}, {'prefix': {'addr': '10.42.0.0', 'len': 16}}),
+                          match({'payload': {'protocol': 'ip', 'field': 'daddr'}}, NODE_IP),
+                          port('tcp', 6443), {'counter': None}, {'accept': None}]),
+        ('asep:deny-tcp', [port('tcp', tcp_ports), {'counter': None}, {'drop': None}]),
+        ('asep:deny-overlay', [port('udp', 8472), {'counter': None}, {'drop': None}]),
+    ]
+
+
+def validate_live(data):
+    """Check actual kernel table semantics/order, not just comments or service state."""
+    tables, chains, rules = [], [], []
+    for entry in data['nftables']:
+        require(len(entry) == 1, 'unexpected nft JSON object')
+        kind, value = next(iter(entry.items()))
+        if kind == 'metainfo':
+            continue
+        require(kind in {'table', 'chain', 'rule'}, 'unexpected set/object in guard table')
+        require(value['family'] == 'inet', 'guard family changed')
+        if kind == 'table':
+            require(value['name'] == TABLE and not value.get('flags'), 'guard name/flags changed')
+            require(set(value) <= {'family', 'name', 'handle', 'flags'}, 'unexpected table attribute')
+            tables.append(value)
+        elif kind == 'chain':
+            require({k: value[k] for k in ['table', 'name', 'type', 'hook', 'prio', 'policy']} ==
+                    dict(table=TABLE, name='input', type='filter', hook='input', prio=10, policy='accept'), 'guard base chain changed')
+            require(set(value) <= {'family', 'table', 'name', 'handle', 'type', 'hook', 'prio', 'policy'}, 'unexpected chain attribute')
+            chains.append(value)
+        else:
+            require(value['table'] == TABLE and value['chain'] == 'input', 'rule chain changed')
+            require(set(value) <= {'family', 'table', 'chain', 'handle', 'expr', 'comment'}, 'unexpected rule attribute')
+            expressions = copy.deepcopy(value['expr'])
+            for expr in expressions:
+                if 'counter' in expr:
+                    require(set(expr) == {'counter'} and isinstance(expr['counter'], dict) and set(expr['counter']) == {'packets', 'bytes'}, 'unexpected counter expression')
+                    expr['counter'] = None
+            rules.append((value.get('comment'), expressions))
+    require(len(tables) == len(chains) == 1 and rules == expected_rules(), 'missing/reordered/modified guard rules')
+
+
+def transaction(text):
+    # add is idempotent; delete/recreate are committed in ONE nft netlink batch.
+    # A failed batch retains previous state. Never delete first in another process.
+    return f'add table inet {TABLE}\ndelete table inet {TABLE}\n' + text
+
+
+def protected(path, mode=None):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'unsafe regular file: ' + str(path))
+    require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022, 'writable/non-root file: ' + str(path))
+    if mode is not None:
+        require(stat.S_IMODE(info.st_mode) == mode, 'wrong file mode: ' + str(path))
+    for parent in path.parents:
+        info = parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022, 'unsafe parent: ' + str(parent))
+
+
+def trusted_inputs():
+    require(os.geteuid() == 0 and Path(__file__).absolute() == HELPER, 'only the approved installed root helper may use apply/check')
+    protected(BASELINE, 0o600)
+    approved = {}
+    for line in BASELINE.read_text().splitlines():
+        sha, name = line.split('  ')
+        require(name not in approved and len(sha) == 64 and all(c in '0123456789abcdef' for c in sha), 'invalid approved baseline')
+        approved[name] = sha
+    for name, path in INSTALLED.items():
+        protected(path)
+        require(hashlib.sha256(path.read_bytes()).hexdigest() == approved[name], 'installed integrity mismatch: ' + name)
+
+
+def command(*args, input_text=None):
+    return subprocess.check_output(args, input=input_text, text=True, stderr=subprocess.PIPE,
+                                   timeout=20, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
+
+
+def check_address():
+    addresses = json.loads(command('/usr/sbin/ip', '-j', '-4', 'address', 'show', 'dev', NODE_IFACE))
+    require(any(a['local'] == NODE_IP for d in addresses for a in d['addr_info']), 'node address missing/changed; no automatic DHCP adaptation')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=['apply', 'check'])
+    args = parser.parse_args()
+    trusted_inputs()  # No subprocess/kernel access before fixed-path/root/integrity gates.
+    # Cooperative lock serializes this helper; other root firewall managers require review.
+    with open('/run/asep-k3s-firewall.lock', 'a', encoding='ascii') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.mode == 'apply':
+            batch = transaction(RULES.read_text())
+            command(NFT, '--check', '--file', '-', input_text=batch)
+            command(NFT, '--file', '-', input_text=batch)
+        validate_live(json.loads(command(NFT, '--json', '--numeric', 'list', 'table', 'inet', TABLE)))
+        if args.mode == 'check':
+            check_address()  # Address may not exist yet when boot-time rules load.
+    print('HOST GUARD ' + args.mode.upper() + ' PASS; peer/CNI/VPN runtime acceptance still required')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+        raise SystemExit('HOST GUARD BLOCKED: ' + detail)

@@ -1,0 +1,26 @@
+# Read-only Owner-session query. No mutation or credential fields.
+query VNT14ReadOnlyPolicyInventory {
+  currentUser { username }
+  project(fullPath: "qhung-13/asep-m01-sandbox") {
+    id
+    fullPath
+    namespace { fullPath plan { name isPaid } }
+    securityPolicyProject { id fullPath }
+    pipelineExecutionPolicies(first: 100, relationship: INHERITED, includeUnscoped: true) {
+      nodes { name enabled }
+      pageInfo { hasNextPage endCursor }
+    }
+    scanExecutionPolicies(first: 100, relationship: INHERITED, includeUnscoped: true) {
+      nodes { name enabled }
+      pageInfo { hasNextPage endCursor }
+    }
+    securityPolicies(first: 100, relationship: INHERITED, includeUnscoped: true) {
+      nodes { name enabled type }
+      pageInfo { hasNextPage endCursor }
+    }
+    complianceFrameworks(first: 100) {
+      nodes { id name }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}

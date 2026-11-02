@@ -1,0 +1,30 @@
+{
+  "maximumObservationAgeSeconds": 300,
+  "projectId": 87786140,
+  "repositoryPath": "qhung-13/asep-m01-sandbox",
+  "requireIndependentOwnerCollection": true,
+  "requireSeparateReadWriteCredentials": true,
+  "requiredSubjects": [
+    "auto-devops",
+    "candidate-ci-includes",
+    "controlled-fault-window",
+    "credential-lifecycle-revocation-plan",
+    "draft-mr-ci-behavior",
+    "environments-deployment-capabilities",
+    "hooks-integrations-deploy-keys-tokens",
+    "inherited-group-compliance",
+    "isolated-controller-verifier",
+    "isolated-operator-executor",
+    "job-token-capabilities",
+    "pipeline-security-policies",
+    "project-group-instance-runners",
+    "project-namespace-permissions",
+    "protected-branches",
+    "runner-execution-protection",
+    "source-push-ci-behavior",
+    "variable-metadata-all-levels"
+  ],
+  "schemaVersion": 1,
+  "sourcePattern": "test/vn-t14/<operation-id>",
+  "targetBranch": "main"
+}

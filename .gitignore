@@ -40,3 +40,6 @@ Thumbs.db
 
 # Graphify generated artifacts
 graphify-out/
+
+# Preserved VN-T14 host preparation, captures and rehearsal history (local only)
+/deploy/delivery/prepared-2026-11-02/

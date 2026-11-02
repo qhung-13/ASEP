@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Fetch PUBLIC pinned artifacts into a new user-owned directory; never install."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import urllib.request
+
+
+def verify(directory, artifacts):
+    for name, entry in artifacts.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size != entry['size']:
+            raise ValueError('missing/unsafe artifact: ' + name)
+        with path.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != entry['sha256']:
+                raise ValueError('artifact checksum mismatch: ' + name)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('directory', type=Path)
+    parser.add_argument('--verify-only', action='store_true')
+    args = parser.parse_args()
+    lock = json.loads(Path(__file__).with_name('versions.lock.json').read_text())
+    artifacts = lock['artifacts']
+    if not args.verify_only:
+        if os.geteuid() == 0:
+            raise ValueError('download as the ordinary Owner, never root')
+        args.directory.mkdir(mode=0o700)  # Refuse an existing destination.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for name, entry in artifacts.items():
+            if Path(name).name != name or not entry['url'].startswith(('https://github.com/k3s-io/k3s/', 'https://raw.githubusercontent.com/k3s-io/k3s/')):
+                raise ValueError('unexpected artifact source')
+            request = urllib.request.Request(entry['url'], headers={'User-Agent': 'ASEP-public-artifact-fetch'})
+            with opener.open(request, timeout=60) as response, (args.directory / name).open('xb') as output:
+                remaining = entry['size']
+                while block := response.read(min(1048576, remaining + 1)):
+                    remaining -= len(block)
+                    if remaining < 0:
+                        raise ValueError('oversized artifact: ' + name)
+                    output.write(block)
+    verify(args.directory, artifacts)
+    if not args.verify_only:
+        (args.directory / 'SHA256SUMS').write_text(''.join(f"{e['sha256']}  {n}\n" for n, e in artifacts.items()))
+    print('PUBLIC ARTIFACT CHECKSUMS PASS; nothing installed or executed')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError) as error:
+        raise SystemExit(str(error))

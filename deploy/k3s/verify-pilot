@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# FUTURE OWNER COMMAND. Reads cluster credentials only after explicit invocation.
+# Does not apply real objects; negative admission probes use server dry-run.
+set -euo pipefail
+[[ ${1:-} == --run-after-owner-approval && $# == 1 ]] || {
+  echo 'Not executed. Usage after installation/review: verify-pilot --run-after-owner-approval' >&2
+  exit 2
+}
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+K=(/usr/local/bin/k3s kubectl --request-timeout=15s)
+"${K[@]}" get --raw=/readyz >/dev/null
+"${K[@]}" -n kube-system rollout status deployment/coredns --timeout=180s
+"${K[@]}" -n asep-pilot rollout status deployment/pilot-server --timeout=180s
+"${K[@]}" -n asep-pilot wait --for=condition=Ready pod/pilot-allowed pod/pilot-denied --timeout=180s
+for pod in pilot-allowed pilot-denied; do
+  "${K[@]}" -n asep-pilot exec "$pod" -- nslookup pilot-server.asep-pilot.svc.cluster.local >/dev/null
+done
+"${K[@]}" -n asep-pilot get service pilot-server -o json | python3 -B -c '
+import json,sys
+s=json.load(sys.stdin)["spec"]
+assert s["type"] == "ClusterIP" and s["selector"] == {"app":"pilot-server"}
+assert len(s["ports"]) == 1
+p=s["ports"][0]
+assert (p["port"],p["targetPort"],p["protocol"]) == (80,8080,"TCP")
+'
+pod_ip=$("${K[@]}" -n asep-pilot get pods -l app=pilot-server -o json | python3 -B -c '
+import ipaddress,json,sys
+pods=json.load(sys.stdin)["items"]
+assert len(pods) == 1
+print(ipaddress.IPv4Address(pods[0]["status"]["podIP"]))
+')
+"${K[@]}" -n asep-pilot get endpointslices -l kubernetes.io/service-name=pilot-server -o json | python3 -B -c '
+import json,sys
+slices=json.load(sys.stdin)["items"]
+assert slices and all(len(s["ports"]) == 1 and s["ports"][0].get("name") in (None, "") and s["ports"][0]["port"] == 8080 and s["ports"][0]["protocol"] == "TCP" for s in slices)
+ready=[a for s in slices for e in s["endpoints"] if e.get("conditions",{}).get("ready") is True for a in e["addresses"]]
+assert ready == [sys.argv[1]]
+' "$pod_ip"
+positive() {
+  [[ $("${K[@]}" -n asep-pilot exec pilot-allowed -- wget -T 3 -qO- "$1") == asep-pilot ]]
+}
+for url in http://pilot-server.asep-pilot.svc.cluster.local:80/ "http://$pod_ip:8080/"; do
+  positive "$url"
+  # A kubectl/exec failure is not policy evidence: only the in-pod wget exit 1
+  # with a successful exec session is accepted as a negative connection result.
+  result=$("${K[@]}" -n asep-pilot exec pilot-denied -- sh -c \
+    'wget -T 3 -qO- "$1" >/dev/null 2>&1; code=$?; printf "%s" "$code"' sh "$url")
+  [[ $result == 1 ]] || { echo 'FAIL / UNKNOWN: denied client HTTP result' >&2; exit 1; }
+  positive "$url"  # Do not mistake an unavailable server for policy enforcement.
+done
+for action in 'get secrets' 'create pods' 'create services' 'create roles'; do
+  read -r verb resource <<<"$action"
+  answer=$("${K[@]}" auth can-i "$verb" "$resource" -n asep-pilot \
+    --as=asep-pilot-review --as-group=asep-pilot-testers || true)
+  [[ $answer == no ]] || { echo "FAIL / UNKNOWN: tester $action" >&2; exit 1; }
+done
+answer=$("${K[@]}" auth can-i create pods/exec -n asep-pilot \
+  --as=asep-pilot-review --as-group=asep-pilot-testers)
+[[ $answer == yes ]]
+answer=$("${K[@]}" auth can-i get secrets -n asep-pilot \
+  --as=system:serviceaccount:asep-pilot:pilot || true)
+[[ $answer == no ]]
+answer=$("${K[@]}" auth can-i create pods/exec -n asep-apps \
+  --as=asep-pilot-review --as-group=asep-pilot-testers || true)
+[[ $answer == no ]]
+
+for fault in privileged hostPath; do
+  # Public, harmless rejected specification. No credential values or host data.
+  spec=$(python3 -B - "$root/versions.lock.json" "$fault" <<'PY'
+import json,sys
+image=json.load(open(sys.argv[1]))['pilotImage']['reference']
+security=dict(runAsNonRoot=True,runAsUser=10001,runAsGroup=10001,seccompProfile=dict(type='RuntimeDefault'))
+c=dict(name='probe',image=image,command=['sleep','1'],securityContext=dict(allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,capabilities=dict(drop=['ALL'])),resources=dict(requests=dict(cpu='10m',memory='16Mi'),limits=dict(cpu='100m',memory='64Mi')))
+s=dict(restartPolicy='Never',automountServiceAccountToken=False,securityContext=security,containers=[c])
+if sys.argv[2]=='privileged':c['securityContext']['privileged']=True
+else:s['volumes']=[dict(name='forbidden',hostPath=dict(path='/non-sensitive-admission-probe'))]
+print(json.dumps(dict(apiVersion='v1',kind='Pod',metadata=dict(name='rejected-'+sys.argv[2].lower(),namespace='asep-pilot'),spec=s)))
+PY
+)
+  if result=$("${K[@]}" apply --dry-run=server -f - <<<"$spec" 2>&1); then
+    echo "FAIL: admission accepted $fault" >&2; exit 1
+  fi
+  [[ $result == *'violates PodSecurity'* && $result == *"$fault"* ]] || {
+    echo "FAIL / UNKNOWN: expected PodSecurity denial for $fault" >&2; exit 1
+  }
+done
+echo 'PILOT DNS / ALLOW-DENY NETWORK / RBAC / ADMISSION CHECKS PASS'
+echo 'RBAC impersonation evaluates policy only; it does not establish a real human identity.'

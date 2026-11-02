@@ -1,0 +1,37 @@
+# REFERENCE EXAMPLE ONLY: documentation IP/interface; not a local host config.
+# PROPOSED example configuration; install/start requires Owner review.
+# Keep these CIDRs/interface/address synchronized with preflight and the runbook.
+node-name: asep-dev
+# Explicit IPv4 wildcard needed for loopback and local CNI -> node API flows.
+# NOT private by itself. Effective IPv4/IPv6 firewall approval blocks START.
+bind-address: 0.0.0.0
+node-ip: 192.0.2.10
+advertise-address: 192.0.2.10
+flannel-iface: example0
+# Keep the host guard's single-node overlay assumptions explicit.
+flannel-backend: vxlan
+# Use the host's real upstream resolver file, not a pod-loopback resolver or
+# K3s's automatic public-DNS fallback. VPN split-DNS still requires Owner review.
+resolv-conf: /run/systemd/resolve/resolv.conf
+cluster-cidr: 10.42.0.0/16
+service-cidr: 10.43.0.0/16
+cluster-dns: 10.43.0.10
+write-kubeconfig-mode: "0600"
+tls-san-security: true
+tls-san:
+  - 127.0.0.1
+  - 192.0.2.10
+secrets-encryption: true
+disable:
+  - traefik
+  - servicelb
+  - metrics-server
+  - local-storage
+# Default bundled containerd, Flannel and network-policy controller remain enabled.
+# Default SQLite; no connection to the existing ASEP PostgreSQL control plane.
+kube-apiserver-arg:
+  - audit-policy-file=/etc/rancher/k3s/audit-policy.yaml
+  - audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log
+  - audit-log-maxage=7
+  - audit-log-maxbackup=2
+  - audit-log-maxsize=10

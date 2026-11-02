@@ -1,0 +1,14 @@
+# REFERENCE EXAMPLE ONLY: documentation IP/interface; not a local host config.
+# PROPOSED single-node host INPUT guard; NOT a whole-host firewall.
+# Loaded atomically by the installed helper into ONLY this ASEP-owned table.
+# No global flush, NAT, FORWARD, OUTPUT or conntrack-established bypass.
+table inet asep_k3s_guard {
+    chain input {
+        type filter hook input priority 10; policy accept;
+        iifname "lo" tcp dport { 6443, 10250 } counter accept comment "asep:local-tcp"
+        iifname "lo" udp dport 8472 counter accept comment "asep:local-overlay"
+        iifname "cni0" ip saddr 10.42.0.0/16 ip daddr 192.0.2.10 tcp dport 6443 counter accept comment "asep:cni-api"
+        tcp dport { 6443, 10250 } counter drop comment "asep:deny-tcp"
+        udp dport 8472 counter drop comment "asep:deny-overlay"
+    }
+}

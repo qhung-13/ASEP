@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Read-only preparation only. No install/apply/start or kubeconfig/secret access.
+set -euo pipefail
+case "${1:-}" in
+  --offline|--host|--diagnostics) [[ $# == 1 ]] ;;
+  *) echo 'Usage: preflight --offline|--host|--diagnostics (no installation mode)' >&2; exit 2 ;;
+esac
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ $1 == --host ]]; then
+  exec python3 -B "$root/check.py" --host
+fi
+if [[ $1 == --diagnostics ]]; then
+  exec python3 -B "$root/check.py" --diagnostics
+fi
+python3 -B "$root/check.py"
+exec python3 -B "$root/integrity.py" --check

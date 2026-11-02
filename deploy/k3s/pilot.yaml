@@ -1,0 +1,164 @@
+# NON-SENSITIVE PILOT ONLY. Apply only after Owner approval and baseline.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pilot-server
+  namespace: asep-pilot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pilot-server
+  template:
+    metadata:
+      labels:
+        app: pilot-server
+    spec:
+      serviceAccountName: pilot
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 10001
+      containers:
+      - name: http
+        image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -ec
+        - printf '%s' asep-pilot > /www/index.html; exec httpd -f -p 8080 -h /www
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: www
+          mountPath: /www
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 1
+          periodSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: www
+        emptyDir:
+          sizeLimit: 8Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilot-server
+  namespace: asep-pilot
+spec:
+  type: ClusterIP
+  selector:
+    app: pilot-server
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pilot-allowed
+  namespace: asep-pilot
+  labels:
+    app: pilot-client
+    access: allowed
+spec:
+  serviceAccountName: pilot
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 5
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: client
+    image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+    imagePullPolicy: IfNotPresent
+    command:
+    - sh
+    - -ec
+    - exec sleep 86400
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pilot-denied
+  namespace: asep-pilot
+  labels:
+    app: pilot-client
+    access: denied
+spec:
+  serviceAccountName: pilot
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 5
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: client
+    image: docker.io/library/busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+    imagePullPolicy: IfNotPresent
+    command:
+    - sh
+    - -ec
+    - exec sleep 86400
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi

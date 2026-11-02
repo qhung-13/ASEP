@@ -1,0 +1,4 @@
+# Reproducible local packaging outputs; never source or enrollment evidence
+*.jar
+__pycache__/
+*.py[cod]

@@ -258,3 +258,12 @@ Operational proof requires real UID/socket/filesystem/network denial, root artif
 pins, valid/revoked mTLS behavior, DB role isolation, actual independently collected
 Safe-CI reports, exact human approval and permitted real GitLab success/fault
 observations. Local fake services and test certificates prove code behavior only.
+
+## Maintained VN-T14 review tooling and deferred acceptance
+
+Source for the scoped protected publisher, credential importer, offline packager
+and fixture tests is in [vn-t14/](vn-t14/README.md). Concrete host preparation and
+raw/rehearsal artifacts remain local and ignored. The
+[deferred-acceptance handoff](../../docs/verification/vnext/VN-T14_DEFERRED_ACCEPTANCE.md)
+separates historically verified local runtime setup from unobserved live delivery
+and fault acceptance. This adds no authorization to install, activate or write.

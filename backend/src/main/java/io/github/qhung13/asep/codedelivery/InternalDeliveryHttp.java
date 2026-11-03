@@ -71,7 +71,7 @@ final class InternalDeliveryHttp implements AutoCloseable {
     private static boolean allowed(String method,String path) {
         if(path==null)return false;
         if(method.equals("GET"))return path.matches("/internal/v1/delivery-authority/[0-9a-f-]{36}/[0-9a-f-]{36}/[0-9a-f-]{36}");
-        return method.equals("POST")&&java.util.Set.of("/internal/v1/controlled-admissions","/internal/v1/controlled-claim","/internal/v1/controlled-review","/internal/v1/controlled-heartbeat","/internal/v1/delivery-intents/claim","/internal/v1/delivery-intents/ack","/internal/v1/delivery-outcomes","/internal/v1/controlled-cancel").contains(path);
+        return method.equals("POST")&&java.util.Set.of("/internal/v1/controlled-admissions","/internal/v1/controlled-claim","/internal/v1/controlled-review","/internal/v1/controlled-slice-review","/internal/v1/controlled-slice-candidate","/internal/v1/controlled-heartbeat","/internal/v1/delivery-intents/claim","/internal/v1/delivery-intents/ack","/internal/v1/delivery-outcomes","/internal/v1/controlled-cancel").contains(path);
     }
     @Override public void close() { client.shutdownNow(); }
     private static IllegalStateException denied() { return new IllegalStateException("Workflow authority unavailable or denied"); }

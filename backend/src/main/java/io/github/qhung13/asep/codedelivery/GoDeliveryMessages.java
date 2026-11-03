@@ -27,6 +27,11 @@ public final class GoDeliveryMessages implements DeliveryMessagePump.Channel,Aut
     public Lease claimControlled(UUID run){return post("/internal/v1/controlled-claim",Map.of("runId",run),Lease.class);}
     public void heartbeat(Lease lease){acknowledged("/internal/v1/controlled-heartbeat",lease);}
     public TestProjectCurrentPolicyVerifier.Snapshot submit(Submission body){return post("/internal/v1/controlled-review",body,TestProjectCurrentPolicyVerifier.Snapshot.class);}
+    /** Registers the existing immutable batch before Go completes implementation;
+     * this acknowledgement is not a review result or delivery authorization. */
+    public void registerSliceCandidate(Submission body){acknowledged("/internal/v1/controlled-slice-candidate",body);}
+    /** Existing protected controller identity; requires a registered synthetic upstream slice. */
+    public TestProjectCurrentPolicyVerifier.Snapshot submitSlice(Submission body){return post("/internal/v1/controlled-slice-review",body,TestProjectCurrentPolicyVerifier.Snapshot.class);}
     public void cancel(UUID run,long version){acknowledged("/internal/v1/controlled-cancel",Map.of("runId",run,"expectedRunVersion",version));}
     @Override public void close(){channel.close();}
 }

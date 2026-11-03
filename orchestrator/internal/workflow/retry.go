@@ -195,6 +195,7 @@ func (s *Store) claimBounded(ctx context.Context, runID, claimant string, second
 }
 
 type retryDecision struct {
+	sliceCorrection                 bool // Internal connector only; durable slice profile is checked below.
 	OperationID, Kind               string
 	Lease                           TaskLease
 	ExpectedRunVersion, PolicyEpoch int64
@@ -210,13 +211,17 @@ type retryReceipt struct {
 
 func (c retryDecision) digest() (string, error) {
 	// Expiry and delivery count remain mutable transport facts, excluded.
+	version := 1
+	if c.sliceCorrection {
+		version = 2
+	}
 	return privateDigest(struct {
 		Version                                                  int
 		OperationKind, RunID, TaskID, AttemptID, Stage, Claimant string
 		Epoch, VersionExpected, Policy                           int64
 		Source, Evidence                                         string
 	}{
-		1, c.Kind, c.Lease.RunID, c.Lease.TaskID, c.Lease.AttemptID, c.Lease.Stage, c.Lease.ClaimantID, c.Lease.LeaseEpoch, c.ExpectedRunVersion, c.PolicyEpoch, c.SourceSHA256, c.EvidenceRef})
+		version, c.Kind, c.Lease.RunID, c.Lease.TaskID, c.Lease.AttemptID, c.Lease.Stage, c.Lease.ClaimantID, c.Lease.LeaseEpoch, c.ExpectedRunVersion, c.PolicyEpoch, c.SourceSHA256, c.EvidenceRef})
 }
 
 func (c retryDecision) validate() error {
@@ -224,7 +229,7 @@ func (c retryDecision) validate() error {
 		c.Lease.LeaseEpoch < 1 || strings.TrimSpace(c.Lease.ClaimantID) == "" || len(c.Lease.ClaimantID) > 128 || c.ExpectedRunVersion < 1 || c.PolicyEpoch < 1 ||
 		!utf8.ValidString(c.Lease.ClaimantID) || !utf8.ValidString(c.EvidenceRef) ||
 		!isLowerHex(c.SourceSHA256, 64) || !strings.HasPrefix(c.EvidenceRef, "synthetic:vn-t10-it-") || len(c.EvidenceRef) > 256 ||
-		(c.Kind != "REWORK" && c.Kind != "REPLAN" && c.Kind != "EXHAUST") || (c.Kind != "EXHAUST" && c.Lease.Stage != "PLANNING") {
+		(c.Kind != "REWORK" && c.Kind != "REPLAN" && c.Kind != "EXHAUST") || (c.Kind != "EXHAUST" && c.Lease.Stage != "PLANNING" && !(c.sliceCorrection && c.Kind == "REWORK" && (c.Lease.Stage == "IMPLEMENTING" || c.Lease.Stage == "VERIFYING"))) {
 		return ErrTransitionRejected
 	}
 	return nil
@@ -330,8 +335,15 @@ func (s *Store) decideRetry(ctx context.Context, c retryDecision) (retryReceipt,
 	if err := checkBoundedPolicy(ctx, tx, c.Lease.RunID, policy); err != nil {
 		return retryReceipt{}, err
 	}
-	if state != c.Lease.Stage || version != c.ExpectedRunVersion || policy != c.PolicyEpoch || source != c.SourceSHA256 || (state != "INVESTIGATING" && state != "PLANNING") {
+	if state != c.Lease.Stage || version != c.ExpectedRunVersion || policy != c.PolicyEpoch || source != c.SourceSHA256 || (state != "INVESTIGATING" && state != "PLANNING" && !(c.sliceCorrection && (state == "IMPLEMENTING" || state == "VERIFYING"))) {
 		return retryReceipt{}, ErrTransitionRejected
+	}
+	if c.sliceCorrection {
+		var current bool
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.workflow_slice_profiles p JOIN orchestration.workflow_runs r ON r.run_id=p.run_id JOIN orchestration.delivery_policies d ON d.policy_id=r.policy_id AND d.policy_epoch=r.policy_epoch WHERE p.run_id=$1::uuid AND r.subject_key LIKE p.scope_prefix || ':%' AND p.expires_at>clock_timestamp() AND d.enabled AND d.expires_at>clock_timestamp())`, c.Lease.RunID).Scan(&current)
+		if err != nil || !current {
+			return retryReceipt{}, ErrTransitionRejected
+		}
 	}
 	var attested string
 	err = tx.QueryRowContext(ctx, `SELECT payload_sha256 FROM orchestration.workflow_synthetic_gate_evidence
@@ -387,6 +399,9 @@ func (s *Store) decideRetry(ctx context.Context, c retryDecision) (retryReceipt,
 		}
 		debit = 1
 		nextState = "PLANNING"
+		if c.sliceCorrection {
+			nextState = "IMPLEMENTING"
+		}
 		taskStatus = "COMPLETED"
 		for _, id := range []*string{&r.NextTaskID, &r.NextAttemptID, &r.OutboxMessageID} {
 			*id, err = freshUUID()
@@ -408,10 +423,19 @@ func (s *Store) decideRetry(ctx context.Context, c retryDecision) (retryReceipt,
 		return retryReceipt{}, err
 	}
 	if debit != 0 {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration.stage_attempts(attempt_id,run_id,stage,semantic_attempt_no) VALUES($1::uuid,$2::uuid,'PLANNING',$3)`, r.NextAttemptID, r.RunID, number+1); err != nil {
+		// Preserve the existing planning retry numbering/collision semantics.
+		// A slice correction comes from a different stage, so only that branch
+		// resolves the latest IMPLEMENTING attempt rather than the VERIFYING number.
+		successorNumber := number + 1
+		if c.sliceCorrection {
+			if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(semantic_attempt_no),0)+1 FROM orchestration.stage_attempts WHERE run_id=$1::uuid AND stage=$2`, r.RunID, nextState).Scan(&successorNumber); err != nil {
+				return retryReceipt{}, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration.stage_attempts(attempt_id,run_id,stage,semantic_attempt_no) VALUES($1::uuid,$2::uuid,$3,$4)`, r.NextAttemptID, r.RunID, nextState, successorNumber); err != nil {
 			return retryReceipt{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration.task_deliveries(task_id,run_id,attempt_id,stage) VALUES($1::uuid,$2::uuid,$3::uuid,'PLANNING')`, r.NextTaskID, r.RunID, r.NextAttemptID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration.task_deliveries(task_id,run_id,attempt_id,stage) VALUES($1::uuid,$2::uuid,$3::uuid,$4)`, r.NextTaskID, r.RunID, r.NextAttemptID, nextState); err != nil {
 			return retryReceipt{}, err
 		}
 		body, err := json.Marshal(struct {

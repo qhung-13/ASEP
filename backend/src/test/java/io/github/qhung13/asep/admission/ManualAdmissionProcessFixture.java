@@ -28,8 +28,9 @@ public final class ManualAdmissionProcessFixture {
         var limits = new JiraTicketReader.Limits(8192, 256, 1024, 8, 128);
         var body = new AtomicReference<>(config.get("body").asString());
         var reads = new AtomicInteger();
-        var policy = new Policy(config.get("prefix").asString(), "synthetic-manual-v1", 1, true,
-                "synthetic-owner", "synthetic-site", "10001", new Repository("42", "0".repeat(40), "main", "1".repeat(40)), 3, limits);
+        boolean slice = config.has("repositoryBaseSha");
+        var policy = new Policy(config.get("prefix").asString(), slice ? config.get("policyId").asString() : "synthetic-manual-v1", 1, true,
+                "synthetic-owner", "synthetic-site", "10001", slice ? new Repository("87786140", config.get("repositoryBaseSha").asString(), "main", config.get("repositoryBaseSha").asString()) : new Repository("42", "0".repeat(40), "main", "1".repeat(40)), slice ? 4 : 3, limits);
         var current = new AtomicReference<>(policy);
         var unavailable = new java.util.concurrent.atomic.AtomicBoolean();
         var port = new WorkflowPort() {
@@ -49,11 +50,12 @@ public final class ManualAdmissionProcessFixture {
             @Override public Outcome submit(Command command) { return exchange("submit", command); }
             @Override public Outcome reconcile(Command command) { return exchange("reconcile", command); }
         };
+        var identity = new AtomicReference<>(new Actor("synthetic-owner", Role.OWNER));
         var service = new SyntheticManualTicketAdmission((s, l) -> {
             reads.incrementAndGet();
             return new FixtureJiraTicketReader(Map.of(s, new FixtureJiraTicketReader.Response(200, "application/json",
                     body.get().getBytes(StandardCharsets.UTF_8)))).read(s, l);
-        }, () -> new Actor("synthetic-owner", Role.OWNER), () -> {
+        }, identity::get, () -> {
             if (unavailable.get()) throw new IllegalStateException("fixture policy unavailable");
             return current.get();
         }, port);
@@ -76,6 +78,17 @@ public final class ManualAdmissionProcessFixture {
                 body.set(action.get("body").asString());
                 emit(Map.of("kind", "body-set"));
                 continue;
+            }
+            if(kind.equals("observe")){
+                var previous=identity.get();identity.set(new Actor("synthetic-owner",Role.valueOf(action.get("role").asString())));
+                try{
+                    var observation=new SyntheticWorkflowObservation(identity::get,current::get,(run,subject)->{
+                        try{emit(Map.of("kind","read-observation","runId",run,"subjectKey",subject));return JSON.treeToValue(JSON.readTree(input.readLine()),SyntheticWorkflowObservation.View.class);}
+                        catch(Exception projectionFailure){throw new Denied();}
+                    });
+                    emit(Map.of("kind","observation","view",observation.read(prepared.get(action.get("slot").asString()),action.get("runId").asString())));
+                }catch(Denied denied){emit(Map.of("kind","observation-denied"));}
+                finally{identity.set(previous);}continue;
             }
             String slot = action.get("slot").asString();
             try {

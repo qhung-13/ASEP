@@ -80,6 +80,44 @@ public final class DeliveryProcessFixture {
                 UUID operation=UUID.fromString(command.get("operationId").asString()),grant=UUID.fromString(command.get("grantId").asString());
                 store=new ControllerDeliveryFlow(controllerGo,controller).prepare(operation,grant,command.get("policyId").asString(),1,remote.baseSha,"d".repeat(64));bind();return Map.of("kind","prepared","request",request);
             }
+            case "prepare-bound"->{
+                UUID operation=UUID.fromString(command.get("operationId").asString()),grant=UUID.fromString(command.get("grantId").asString());
+                var job=new ProtectedCandidateController.Job(operation,UUID.fromString(command.get("runId").asString()),UUID.fromString(command.get("attemptId").asString()),command.get("deliveryVersion").asLong(),grant,command.get("policyId").asString(),1,remote.baseSha,"d".repeat(64));
+                byte[] proposal=command.get("content").asString().getBytes(StandardCharsets.US_ASCII);
+                try{store=controller.produceStoppedProposal(job,proposal);bind();return Map.of("kind","candidate-prepared","request",request,"seal",store.seal(request.sealReceiptId()));}
+                catch(ProtectedCandidateController.VerificationRejected failed){
+                    var report=failed.report();if(report==null||report.failed()<1)throw failed;
+                    return Map.of("kind","candidate-rejected","discovered",report.discovered(),"executed",report.executed(),"failed",report.failed(),"logsSha256",report.logsSha256());
+                }
+            }
+            case "register-bound"->{
+                if(request==null)throw new IllegalStateException();
+                var submission=new GoDeliveryMessages.Submission(request.operationId(),UUID.fromString(command.get("producerTaskId").asString()),command.get("producerLeaseEpoch").asLong(),request,store.seal(request.sealReceiptId()),store.verification(request.verificationReceiptId()));
+                String fault=command.has("fault")?command.get("fault").asString():"none";
+                if(!fault.equals("none")&&!fault.equals("executor")){
+                    var json=(tools.jackson.databind.node.ObjectNode)JdbcDeliveryLedger.JSON.valueToTree(submission);
+                    var seal=(tools.jackson.databind.node.ObjectNode)json.get("seal");
+                    switch(fault){
+                        case "run"->seal.put("runId",UUID.randomUUID().toString());
+                        case "attempt"->seal.put("attemptId",UUID.randomUUID().toString());
+                        case "source"->seal.put("baseSha","f".repeat(40));
+                        case "candidate"->seal.put("commitSha","f".repeat(40));
+                        case "policy"->((tools.jackson.databind.node.ObjectNode)json.get("request")).put("policyId","synthetic-other-policy");
+                        case "not-stopped"->seal.put("writerStoppedAt",store.seal(request.sealReceiptId()).sealedAt().plusSeconds(1).toString());
+                        default->throw new IllegalArgumentException();
+                    }
+                    submission=JdbcDeliveryLedger.JSON.treeToValue(json,GoDeliveryMessages.Submission.class);
+                }
+                try{(fault.equals("executor")?executorGo:controllerGo).registerSliceCandidate(submission);return Map.of("kind","candidate-registered");}
+                catch(DeliveryException denied){return Map.of("kind","candidate-denied");}
+            }
+            case "submit-bound"->{
+                if(request==null)throw new IllegalStateException();
+                try{
+                    var snapshot=controllerGo.submitSlice(new GoDeliveryMessages.Submission(request.operationId(),UUID.fromString(command.get("producerTaskId").asString()),command.get("producerLeaseEpoch").asLong(),request,store.seal(request.sealReceiptId()),store.verification(request.verificationReceiptId())));
+                    return Map.of("kind","bound-authorized","requestHash",snapshot.authorizedRequestHash());
+                }catch(DeliveryException denied){return Map.of("kind","bound-denied");}
+            }
             case "resume"->{store=new ControllerEvidenceStore(directory.resolve("evidence"),((Number)Files.getAttribute(directory.resolve("evidence"),"unix:uid")).longValue(),UUID.fromString(command.get("operationId").asString()));bind();return Map.of("kind","resumed","request",request);}
             case "approve"->{new OwnerGrantAuthority(issuerDatabase,"asep_delivery_issuer").approve(request,command.get("seconds").asInt());return Map.of("kind","approved");}
             case "await-expiry"->{
@@ -101,6 +139,15 @@ public final class DeliveryProcessFixture {
                 boolean denied=false;TestProjectDeliveryRecord result=null;
                 try(var executor=ProtectedDeliveryExecutor.open(execution,action.equals("execute"),true)){result=executor.run();}catch(RuntimeException unavailable){denied=true;}
                 return Map.of("kind","observed","denied",denied,"complete",result!=null&&result.exactRemoteCandidateObserved(),"race",result!=null&&result.residualRace(),"pushes",remote.pushes.get(),"mrs",remote.mrs.size(),"mrCreates",remote.creates.get(),"sourceHead",remote.head(request.sourceBranch())==null?"":remote.head(request.sourceBranch()));
+            }
+            case "remote-facts"->{
+                UUID operation=UUID.fromString(command.get("operationId").asString());int rows;
+                try(var db=runtime.getConnection();var query=db.prepareStatement("SELECT count(*) FROM code_delivery.vn_t14_operations WHERE operation_id=?")){query.setObject(1,operation);try(var result=query.executeQuery()){result.next();rows=result.getInt(1);}}
+                return Map.of("kind","remote-facts","pushes",remote.pushes.get(),"mrCreates",remote.creates.get(),"forbidden",remote.forbidden.get(),"mainHead",remote.head("main"),"sourceHead",request==null?"":java.util.Objects.toString(remote.head(request.sourceBranch()),""),"ledgerRows",rows,"mrs",remote.mrs.stream().map(mr->Map.of("iid",mr.get("iid"),"sha",mr.get("sha"),"draft",mr.get("draft"),"state",mr.get("state"),"target",mr.get("target_branch"))).toList());
+            }
+            case "observe-delivery"->{
+                var recorded=ledger.find(request.operationId());
+                return Map.of("kind","delivery-observation","delivery",Map.of("branchPush",recorded==null?"PLANNED":recorded.push().name(),"draftMr",recorded==null?"PLANNED":recorded.mergeRequest().name(),"ci","NOT_OBSERVED","humanMerge","NOT_OBSERVED","synthetic",true));
             }
             case "publish"->{boolean unknown=false;try{pump.publishOutcomes(request.operationId(),100);}catch(DeliveryException lost){unknown=true;}return Map.of("kind","published","unknown",unknown);}
             default->throw new IllegalArgumentException();

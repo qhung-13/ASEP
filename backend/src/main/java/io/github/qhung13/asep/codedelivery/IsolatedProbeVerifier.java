@@ -18,6 +18,10 @@ public final class IsolatedProbeVerifier implements IndependentVerifier {
     private static final String LABEL="io.github.qhung13.asep.verification-job";
     @FunctionalInterface interface Commands { byte[] run(List<String> args,Duration limit,int bound)throws Exception; }
     private final Path harness;private final String harnessHash,image;private final Duration timeout;private final Path jobs;private final long owner;
+    private static final class CommandFailed extends Exception {
+        final int exitCode;final byte[] output;
+        CommandFailed(int code,byte[] boundedOutput){super("Protected verifier command failed");exitCode=code;output=boundedOutput.clone();}
+    }
     private final Commands docker;
     public IsolatedProbeVerifier(Path reviewedHarness,String harnessSha256,String imageSha256,Duration timeout){
         this(reviewedHarness,harnessSha256,imageSha256,timeout,null,-1);
@@ -54,9 +58,16 @@ public final class IsolatedProbeVerifier implements IndependentVerifier {
                     "--entrypoint","java","sha256:"+image,"-XX:-HeapDumpOnOutOfMemoryError","-Dloader.main=io.github.qhung13.asep.codedelivery.ProbeVerificationMain",
                     "-cp","/verifier.jar","org.springframework.boot.loader.launch.PropertiesLauncher","/candidate"),Duration.ofSeconds(5),2048);
             phase="cid";cid=Files.readString(cidfile).strip();if(!cid.matches("[0-9a-f]{64}"))throw ControllerEvidenceStore.denied();
-            phase="start";byte[] output=docker.run(List.of("/usr/bin/docker","start","--attach",cid),timeout,4096);
+            phase="start";byte[] output;int exitCode=0;
+            try{output=docker.run(List.of("/usr/bin/docker","start","--attach",cid),timeout,4096);}
+            catch(CommandFailed failed){
+                // A nonzero attached harness result can be retained as FAILED,
+                // never PASS. Missing/malformed output remains unavailable.
+                if(failed.exitCode!=1)throw failed;output=failed.output;exitCode=failed.exitCode;
+            }
             phase="result";var result=JdbcDeliveryLedger.JSON.readValue(output,ProbeVerificationMain.Result.class);
-            return new VerificationReport(result.discovered(),result.executed(),result.skipped(),result.failed(),0,false,ControllerEvidenceStore.digest(output),harnessHash,image);
+            if(exitCode!=0&&(result.failed()<1||result.discovered()<1||result.executed()<1||result.executed()>result.discovered()))throw ControllerEvidenceStore.denied();
+            return new VerificationReport(result.discovered(),result.executed(),result.skipped(),result.failed(),exitCode,false,ControllerEvidenceStore.digest(output),harnessHash,image);
         }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw ControllerEvidenceStore.denied();}
         catch(Exception denied){throw new IllegalStateException("Isolated verifier denied at "+phase);}
         finally{
@@ -122,7 +133,7 @@ public final class IsolatedProbeVerifier implements IndependentVerifier {
             var bytes=executor.submit(()->{try(var stream=process.getInputStream()){byte[] output=stream.readNBytes(bound+1);if(output.length>bound)throw ControllerEvidenceStore.denied();return output;}});
             try{
                 if(!process.waitFor(limit.toNanos(),TimeUnit.NANOSECONDS))throw ControllerEvidenceStore.denied();
-                byte[] output=bytes.get(1,TimeUnit.SECONDS);if(process.exitValue()!=0)throw ControllerEvidenceStore.denied();return output;
+                byte[] output=bytes.get(1,TimeUnit.SECONDS);if(process.exitValue()!=0)throw new CommandFailed(process.exitValue(),output);return output;
             }finally{process.destroyForcibly();process.waitFor(2,TimeUnit.SECONDS);bytes.cancel(true);}
         }
     }

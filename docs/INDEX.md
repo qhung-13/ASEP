@@ -12,6 +12,7 @@
 | [ADRs](architecture/adr/vnext/ADR-VN-01-COMPONENT-BOUNDARIES.md) | vNext component/authority ADRs VN-01..04; deployment proposal VN-05 listed separately; ADR-001/002 historical decisions preserved |
 | [Hybrid K3s foundation amendment](architecture/adr/vnext/ADR-VN-05-HYBRID-K3S-DEPLOYMENT.md) | PROPOSED; Owner-selected platform direction, concrete plan pending review; protected VN-T14 host/Docker topology unchanged; no installation authorization |
 | [Verification](verification/vnext/TRACEABILITY_AND_RISKS.md) | VNX-V01..15 and fault plans OPEN; M01 V-01..14 remain OPEN |
+| [Bounded synthetic workflow v1](architecture/vnext/BOUNDED_SYNTHETIC_WORKFLOW_V1.md) | VN-T15 connection contract; deterministic fixture scope only, no live authorization or inference claim; [local validation](verification/vnext/VN-T15_SYNTHETIC_VALIDATION.md) |
 | [Roadmap proposal](governance/vnext/ROADMAP_PROPOSAL.md) | P-01 priority, security/contract prerequisites; Project Control ticket mapping pending |
 | [Adoption checklist](governance/vnext/ADOPTION_CHECKLIST.md) | Docs-vs-execution gate separation, live Git diff required |
 

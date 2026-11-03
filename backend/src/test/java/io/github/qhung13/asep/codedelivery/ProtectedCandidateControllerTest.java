@@ -40,6 +40,32 @@ class ProtectedCandidateControllerTest {
         Files.setPosixFilePermissions(root,PosixFilePermissions.fromString("rwx------"));
         return new ProtectedCandidateController(root,uid(),profile,source(),verifier,Clock.systemUTC());
     }
+    @Test void stoppedProposalIsTestedAndCorrectionReverifiesNewCandidate()throws Exception{
+        Job first=job();var rejectedSha=new java.util.concurrent.atomic.AtomicReference<String>();
+        IndependentVerifier verifier=(path,request)->{
+            try{
+                var child=new ProcessBuilder(Path.of(System.getProperty("java.home"),"bin","java").toString(),"-cp",System.getProperty("java.class.path"),ProbeVerificationMain.class.getName(),path.toString());
+                child.environment().clear();child.environment().put("LANG","C.UTF-8");child.redirectError(ProcessBuilder.Redirect.DISCARD);
+                var process=child.start();try{
+                    assertTrue(process.waitFor(10,TimeUnit.SECONDS));byte[] output=process.getInputStream().readNBytes(4097);assertTrue(output.length<=4096);
+                    var result=JdbcDeliveryLedger.JSON.readValue(output,ProbeVerificationMain.Result.class);
+                    if(result.failed()>0)rejectedSha.set(request.candidateCommitSha());
+                    return new VerificationReport(result.discovered(),result.executed(),result.skipped(),result.failed(),process.exitValue(),false,ControllerEvidenceStore.digest(output),profile.harnessSha256(),profile.imageSha256());
+                }finally{process.destroyForcibly();assertTrue(process.waitFor(2,TimeUnit.SECONDS));}
+            }catch(Exception unavailable){throw new IllegalStateException("Protected test process unavailable");}
+        };
+        var controller=controller(verifier);
+        var failure=assertThrows(VerificationRejected.class,()->controller.produceStoppedProposal(first,"INCORRECT\n".getBytes(StandardCharsets.US_ASCII)));
+        assertEquals(2,failure.report().discovered());assertTrue(failure.report().failed()>0);assertNotEquals(0,failure.report().exitCode());
+        assertFalse(Files.exists(root.resolve("operations").resolve(first.operationId().toString())));
+        var corrected=new Job(first.operationId(),first.runId(),UUID.randomUUID(),first.deliveryRunVersion()+2,first.grantId(),first.policyId(),first.policyEpoch(),first.baseSha(),first.safeCiProfileSha256());
+        var stored=controller.produceStoppedProposal(corrected,probeContent(first.operationId()));
+        assertNotEquals(rejectedSha.get(),stored.request().candidateCommitSha());
+        assertEquals(corrected.producerAttemptId(),stored.request().attemptId());
+        assertEquals(2,stored.verification(stored.request().verificationReceiptId()).executed());
+        assertThrows(IllegalStateException.class,()->controller.existing(first));
+        assertThrows(IllegalStateException.class,()->controller.produceStoppedProposal(corrected,"STALE\n".getBytes(StandardCharsets.US_ASCII)));
+    }
     @Test void realHarnessPublishesExactImmutableBatchAndRestartReusesOriginal()throws Exception{
         Job job=job();var stored=controller(actualProcess()).produce(job);var request=stored.request();
         assertEquals(job.runId(),request.runId());assertEquals(job.producerAttemptId(),request.attemptId());

@@ -134,8 +134,18 @@ func (i *ReviewIssuer) Close() error { return i.db.Close() }
 func (i *ReviewIssuer) SubmitControlledEvidence(ctx context.Context, c ControlledSubmission) error {
 	r, seal, v := c.Request, c.Seal, c.Verification
 	hash, err := r.Hash()
-	if err != nil || !canonicalUUID(c.EvidenceID) || !canonicalUUID(c.ProducerTaskID) || c.LeaseEpoch < 1 || r.RunVersion != 3 {
+	if err != nil || !canonicalUUID(c.EvidenceID) || !canonicalUUID(c.ProducerTaskID) || c.LeaseEpoch < 1 || r.RunVersion < 3 {
 		return ErrDeliveryDenied
+	}
+	var sliceExpiry time.Time
+	if r.RunVersion != 3 {
+		// Register the existing immutable controller batch before the handoff,
+		// while the current producer is leased, or replay it during VERIFYING.
+		// The narrow view enforces attempt/task state; no workflow write is given
+		// to the protected issuer and there is no circular success prerequisite.
+		if i.db.QueryRowContext(ctx, `SELECT expires_at FROM orchestration.slice_candidate_context WHERE run_id=$1::uuid AND producer_attempt_id=$2::uuid AND producer_task_id=$3::uuid AND claimant_id=$4 AND lease_epoch=$5 AND ((state='IMPLEMENTING' AND run_version=$6::bigint-1) OR (state='VERIFYING' AND run_version=$6::bigint)) AND policy_id=$7 AND policy_epoch=$8 AND repository_base_sha=$9 AND expires_at>clock_timestamp()`, r.RunID, r.AttemptID, c.ProducerTaskID, ControllerClaimant, c.LeaseEpoch, r.RunVersion-2, r.PolicyID, r.PolicyEpoch, r.BaseSHA).Scan(&sliceExpiry) != nil {
+			return ErrDeliveryDenied
+		}
 	}
 	var profile, harness, image string
 	var minimum, maxAge int
@@ -152,6 +162,9 @@ func (i *ReviewIssuer) SubmitControlledEvidence(ctx context.Context, c Controlle
 	expires := seal.ExpiresAt
 	if v.ExpiresAt.Before(expires) {
 		expires = v.ExpiresAt
+	}
+	if !sliceExpiry.IsZero() && sliceExpiry.Before(expires) {
+		expires = sliceExpiry
 	}
 	submissionHash, err := privateDigest(c)
 	if err != nil {
@@ -315,10 +328,16 @@ func (i *ReviewIssuer) IssueDeliveryReview(ctx context.Context, id string) error
 	if prior {
 		return nil
 	}
-	if state != "REVIEWING" || version != 2 {
+	if state != "REVIEWING" || r.RunVersion != version+1 {
 		return ErrDeliveryDenied
 	}
-	_, err = i.db.ExecContext(ctx, `INSERT INTO orchestration.delivery_review_evidence(evidence_id,run_id,producer_attempt_id,review_attempt_id,task_id,claimant_id,lease_epoch,expected_run_version,policy_id,policy_epoch,request_hash,request_json,expires_at) SELECT $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,2,$8,$9,$10,$11::jsonb,$12 WHERE $12::timestamptz>clock_timestamp() AND $13::timestamptz>clock_timestamp() ON CONFLICT DO NOTHING`, id, run, producer, attempt, task, claimant, epoch, r.PolicyID, r.PolicyEpoch, hash, string(body), expires, leaseExpires)
+	if version != 2 {
+		var scoped bool
+		if i.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.slice_candidate_context WHERE run_id=$1::uuid AND producer_attempt_id=$2::uuid AND state='REVIEWING' AND run_version=$3 AND expires_at>clock_timestamp())`, run, producer, version).Scan(&scoped) != nil || !scoped {
+			return ErrDeliveryDenied
+		}
+	}
+	_, err = i.db.ExecContext(ctx, `INSERT INTO orchestration.delivery_review_evidence(evidence_id,run_id,producer_attempt_id,review_attempt_id,task_id,claimant_id,lease_epoch,expected_run_version,policy_id,policy_epoch,request_hash,request_json,expires_at) SELECT $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,$14,$8,$9,$10,$11::jsonb,$12 WHERE $12::timestamptz>clock_timestamp() AND $13::timestamptz>clock_timestamp() ON CONFLICT DO NOTHING`, id, run, producer, attempt, task, claimant, epoch, r.PolicyID, r.PolicyEpoch, hash, string(body), expires, leaseExpires, version)
 	if err != nil {
 		return ErrDeliveryDenied
 	}

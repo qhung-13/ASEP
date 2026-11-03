@@ -17,10 +17,10 @@ done
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # proof-only and cleanup-failure exercise this harness, never production behavior.
 mode="${ASEP_VN_T11_HARNESS_MODE:-all}"
-case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10|manual-admission|delivery-authority) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
+case "$mode" in all|proof-only|cleanup-failure|heartbeat|b2|rf06-process|rf07a|rf07b|rf08|rf09|rf10|manual-admission|delivery-authority|bounded-slice) ;; *) echo 'ERROR: invalid harness verification mode' >&2; exit 2 ;; esac
 # The cross-component fixture is required in full and manual-admission runs.
 # Other focused VN-T11 modes keep their existing toolchain requirements.
-if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-authority ]]; then
+if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-authority || "$mode" == bounded-slice ]]; then
   command -v java >/dev/null || { echo 'ERROR: Java 21+ required for private admission fixture' >&2; exit 2; }
 fi
 run_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
@@ -50,7 +50,7 @@ cleanup() {
   local result=$? cid actual cleanup_failed=false
   trap - EXIT INT TERM
   stop_active
-  for resource in flyway_delivery flyway_v13 flyway_v12 flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
+  for resource in flyway_delivery flyway_v14 flyway_v13 flyway_v12 flyway_v11 flyway_v10 flyway_v9 flyway_v8 flyway_v7 flyway_v6 flyway postgres; do
     if [[ -s "$private_dir/$resource.cid" ]]; then
       read -r cid < "$private_dir/$resource.cid" || true
       [[ "$cid" =~ ^[0-9a-f]{64}$ ]] || { cleanup_failed=true; continue; }
@@ -91,7 +91,7 @@ run_bounded() {
   active_group=''
 }
 
-if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-authority ]]; then
+if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-authority || "$mode" == bounded-slice ]]; then
   phase='compile private Java admission pipe peer'
   export ASEP_VN_T12_JAVA_BIN="$(command -v java)"
   export ASEP_VN_T12_JAVA_CLASSPATH_FILE="$private_dir/java-classpath"
@@ -99,7 +99,7 @@ if [[ "$mode" == all || "$mode" == manual-admission || "$mode" == delivery-autho
   if [[ "${ASEP_VN_T12_MAVEN_OFFLINE:-false}" == true ]]; then maven_options+=(--offline); fi
   # Maven owns dependency resolution; no host-wide jar scanning or temporary overlays.
   cd ../backend
-  run_bounded 180 ./mvnw "${maven_options[@]}" -Dtest=ManualAdmissionProcessFixtureTest,DeliveryProcessFixtureTest \
+  run_bounded 180 ./mvnw "${maven_options[@]}" clean -Dtest=ManualAdmissionProcessFixtureTest,DeliveryProcessFixtureTest \
     "-Dasep.manualBridge.classpathFile=$ASEP_VN_T12_JAVA_CLASSPATH_FILE" test
   run_bounded 180 ./mvnw "${maven_options[@]}" -DskipTests package
   export ASEP_DELIVERY_HARNESS_JAR="$private_dir/delivery-harness.jar"
@@ -470,6 +470,19 @@ history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database
 [[ "$history" == '1,2,3,4,5,6,7,8,9,10,11,12,13' ]] || fail
 echo 'V13 durable delivery messages migration PASS'
 
+phase='bounded workflow V14 migration'
+docker_cmd create --cidfile "$private_dir/flyway_v14.cid" --label "$owner_label=$run_id" \
+ --network host --env-file "$private_dir/flyway.env" -v "$PWD/db/migrations:/flyway/sql:ro" \
+ flyway/flyway:11 -target=14 migrate >"$private_dir/flyway-v14-create.log" 2>&1
+flyway_v14_id="$(cat "$private_dir/flyway_v14.cid")"
+docker_cmd start "$flyway_v14_id" >/dev/null
+run_bounded 120 docker wait "$flyway_v14_id" > "$private_dir/flyway-v14-exit"
+[[ "$(cat "$private_dir/flyway-v14-exit")" == 0 ]] || fail
+history="$(docker_cmd exec "$postgres_id" psql -X -qAt -U postgres -d "$database" -c \
+ "SELECT string_agg(version,',' ORDER BY installed_rank) FROM orchestration.flyway_schema_history WHERE success")"
+[[ "$history" == '1,2,3,4,5,6,7,8,9,10,11,12,13,14' ]] || fail
+echo 'V14 bounded synthetic workflow migration PASS'
+
 phase='Java-owned delivery schema for cross-component fixture'
 printf 'FLYWAY_URL=jdbc:postgresql://127.0.0.1:%s/%s\nFLYWAY_USER=asep_delivery_migrator\nFLYWAY_PASSWORD=%s\nFLYWAY_SCHEMAS=code_delivery\nFLYWAY_DEFAULT_SCHEMA=code_delivery\nFLYWAY_BASELINE_ON_MIGRATE=false\n' \
  "$port" "$database" "$delivery_migration_password" > "$private_dir/delivery-flyway.env"
@@ -480,7 +493,7 @@ delivery_flyway_id="$(cat "$private_dir/flyway_delivery.cid")"
 docker_cmd start "$delivery_flyway_id" >/dev/null
 run_bounded 120 docker wait "$delivery_flyway_id" > "$private_dir/delivery-flyway-exit"
 [[ "$(cat "$private_dir/delivery-flyway-exit")" == 0 ]] || fail
-if [[ "$mode" == all || "$mode" == delivery-authority ]]; then
+if [[ "$mode" == all || "$mode" == delivery-authority || "$mode" == bounded-slice ]]; then
  image_id="$(docker_cmd image inspect --format '{{.Id}}' flyway/flyway:11)"
  python3 - "$private_dir" "$port" "$database" "$nonce" "$ASEP_DELIVERY_HARNESS_JAR" "${image_id#sha256:}" <<'PYCROSS'
 import json,pathlib,sys
@@ -490,14 +503,18 @@ PYCROSS
 fi
 
 authority_pattern='^Test(DeliveryAuthority|ControlledDelivery|DeliveryMessages)'
-if [[ "$mode" == all || "$mode" == delivery-authority ]]; then authority_pattern='^Test(DeliveryAuthority|ControlledDelivery|DeliveryMessages|DeliveryPipeline)'; fi
+if [[ "$mode" == all || "$mode" == delivery-authority || "$mode" == bounded-slice ]]; then authority_pattern='^Test(DeliveryAuthority|ControlledDelivery|DeliveryMessages|DeliveryPipeline)'; fi
+if [[ "$mode" == all || "$mode" == bounded-slice ]]; then authority_pattern='^Test(DeliveryAuthority|ControlledDelivery|DeliveryMessages|DeliveryPipeline|BoundedSlice)'; fi
+if [[ "$mode" == bounded-slice ]]; then authority_pattern='^Test(DeliveryAuthority|BoundedSlice)'; fi
 phase='protected delivery authority PostgreSQL regression'
+# Suite wall-time includes both legacy delivery and VN-T15 process matrices.
+# It does not change any per-run, lease, verification or evidence expiry.
 # Only this dedicated group receives owned-fixture authority/migration passwords.
 # Never export these to legacy worker/agent child-process fixtures.
 if ! ASEP_DELIVERY_AUTHORITY_TEST_PASSWORD="$authority_password" \
 ASEP_DELIVERY_MIGRATOR_TEST_PASSWORD="$migrator_password" \
 ASEP_DELIVERY_FIXTURE_CONFIG="$private_dir/cross-component.json" \
-run_bounded 180 go test -race -count=1 -tags=integration,deliveryauthority -timeout=120s -v \
+run_bounded 240 go test -race -count=1 -tags=integration,deliveryauthority -timeout=180s -v \
   -run "$authority_pattern" ./internal/workflow > "$private_dir/delivery-authority.log" 2>&1; then
   cat "$private_dir/delivery-authority.log"
   fail
@@ -505,7 +522,15 @@ fi
 cat "$private_dir/delivery-authority.log"
 if grep -q -- '--- SKIP:' "$private_dir/delivery-authority.log"; then fail; fi
 [[ "$(grep -c '^--- PASS: TestDeliveryAuthority' "$private_dir/delivery-authority.log")" == 9 ]] || fail
-if [[ "$mode" == delivery-authority ]]; then
+if [[ "$mode" == all || "$mode" == bounded-slice ]]; then
+  for expected in TestBoundedSliceAcrossJavaGoPython TestBoundedSliceSafetyMatrix TestBoundedSliceSealRequiredBeforeImplementationSuccess TestBoundedSliceIssuedSealCannotFollowCorrection; do
+    grep -q "^--- PASS: $expected (" "$private_dir/delivery-authority.log" || fail
+  done
+  for scenario in failed-tests-block correction-success correction-budget-exhaustion policy-revoked stale-candidate model-token-budget model-call-budget elapsed-budget model-unavailable unknown-mr-response stale-source-result; do
+    grep -q -- "--- PASS: TestBoundedSliceSafetyMatrix/$scenario (" "$private_dir/delivery-authority.log" || fail
+  done
+fi
+if [[ "$mode" == delivery-authority || "$mode" == bounded-slice ]]; then
   run_bounded 120 go vet ./...
   run_bounded 120 go test -race -count=1 -timeout=90s ./...
   echo 'Owned delivery authority fixture PASS; no live controller, PKI or GitLab operation'
@@ -763,4 +788,4 @@ if [[ "$mode" == heartbeat ]]; then
 fi
 phase='race-enabled PostgreSQL regression suite'
 run_bounded 240 go test -race -count=1 -tags=integration -timeout=180s -v ./...
-echo 'VN-T11/VN-T14 disposable verification PASS: proof guard, V1-V13 + Java V1-V7, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'
+echo 'VN-T11/VN-T14 disposable verification PASS: proof guard, V1-V14 + Java V1-V7, B0/B1/B2/RF-06/RF-07/RF-08/RF-09/RF-10 regressions'

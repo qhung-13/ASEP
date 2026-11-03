@@ -42,7 +42,20 @@ public final class ProtectedCandidateController {
         if(!matches(job,old.request()))throw ControllerEvidenceStore.denied();
         new TestProjectDeliveryPreparation(old,old,profile,clock).prepare(old.request());return old;
     }
-    public ControllerEvidenceStore produce(Job job){
+    public ControllerEvidenceStore produce(Job job){return produceProposal(job,probeContent(job.operationId()));}
+    /** Trusted supervisor must have reaped the untrusted writer before passing its
+     * bounded proposal bytes. The controller snapshots them; they are not evidence.
+     * The existing protected oracle still checks the exact permitted probe. */
+    public ControllerEvidenceStore produceStoppedProposal(Job job,byte[] proposedProbe){
+        if(proposedProbe==null||proposedProbe.length<1||proposedProbe.length>2048)throw ControllerEvidenceStore.denied();
+        return produceProposal(job,proposedProbe.clone());
+    }
+    public static final class VerificationRejected extends IllegalStateException {
+        private final VerificationReport report;
+        VerificationRejected(VerificationReport report){super("Protected candidate tests rejected");this.report=report;}
+        public VerificationReport report(){return report;}
+    }
+    private ControllerEvidenceStore produceProposal(Job job,byte[] proposedProbe){
         Path staging=null;String phase="start";
         try {
             ProtectedOperatorFiles.directory(root,controllerUid,false);
@@ -50,6 +63,7 @@ public final class ProtectedCandidateController {
             Path published=operations.resolve(job.operationId().toString());
             // Exact retry reads the original batch; it never refreshes receipts or TTL.
             if(Files.exists(published,LinkOption.NOFOLLOW_LINKS)){
+                if(!java.util.Arrays.equals(proposedProbe,probeContent(job.operationId())))throw ControllerEvidenceStore.denied();
                 var old=new ControllerEvidenceStore(root,controllerUid,job.operationId());
                 if(!matches(job,old.request()))throw ControllerEvidenceStore.denied();
                 new TestProjectDeliveryPreparation(old,old,profile,clock).prepare(old.request());return old;
@@ -65,7 +79,7 @@ public final class ProtectedCandidateController {
             if(originalTree.length>1048576||!gitId(ObjectType.TREE,originalTree).equals(parsed.tree()))throw ControllerEvidenceStore.denied();
             var entries=new ArrayList<>(tree(originalTree));String path="vn-t14-probe-"+job.operationId()+".txt";
             if(entries.stream().anyMatch(e->e.name().equals(path)))throw ControllerEvidenceStore.denied();
-            byte[] probe=probeContent(job.operationId());String blob=gitId(ObjectType.BLOB,probe);
+            byte[] probe=proposedProbe;String blob=gitId(ObjectType.BLOB,probe);
             entries.add(new Entry("100644",path,blob));entries.sort(Comparator.comparing(e->e.name()+(e.mode().equals("40000")?"/":"")));
             var output=new ByteArrayOutputStream();for(var e:entries){output.writeBytes((e.mode()+" "+e.name()+"\0").getBytes(StandardCharsets.US_ASCII));output.writeBytes(HexFormat.of().parseHex(e.sha()));}
             byte[] tree=output.toByteArray();String candidateTree=gitId(ObjectType.TREE,tree);
@@ -90,7 +104,7 @@ public final class ProtectedCandidateController {
             if(report==null||report.timedOut()||report.exitCode()!=0||report.discovered()<profile.minimumTests()
                     ||report.executed()!=report.discovered()||report.failed()!=0||report.skipped()!=0
                     ||!profile.harnessSha256().equals(report.harnessSha256())||!profile.imageSha256().equals(report.imageSha256())
-                    ||report.logsSha256()==null||!report.logsSha256().matches("[0-9a-f]{64}"))throw ControllerEvidenceStore.denied();
+                    ||report.logsSha256()==null||!report.logsSha256().matches("[0-9a-f]{64}"))throw new VerificationRejected(report);
             var verification=new Verification(verificationId,job.runId(),job.producerAttemptId(),sealId,request.manifestSha256(),profile.profileSha256(),profile.harnessSha256(),profile.imageSha256(),report.logsSha256(),report.discovered(),report.executed(),report.skipped(),report.failed(),report.exitCode(),report.timedOut(),verified,verified.plus(profile.maximumReceiptAge()));
             byte[] sealBytes=JdbcDeliveryLedger.JSON.writeValueAsBytes(seal),verificationBytes=JdbcDeliveryLedger.JSON.writeValueAsBytes(verification);
             write(staging.resolve("seal.json"),sealBytes);write(staging.resolve("verification.json"),verificationBytes);
@@ -108,7 +122,7 @@ public final class ProtectedCandidateController {
                 try(var dir=FileChannel.open(operations,StandardOpenOption.READ)){dir.force(true);}
             }
             return new ControllerEvidenceStore(root,controllerUid,job.operationId());
-        }catch(Exception denied){throw new IllegalStateException("Controller issuance denied at "+phase+" ("+denied.getClass().getSimpleName()+")"+(denied.getMessage()!=null&&denied.getMessage().startsWith("Isolated verifier denied at ")?" "+denied.getMessage():""));}
+        }catch(Exception denied){if(denied instanceof VerificationRejected failure)throw failure;throw new IllegalStateException("Controller issuance denied at "+phase+" ("+denied.getClass().getSimpleName()+")"+(denied.getMessage()!=null&&denied.getMessage().startsWith("Isolated verifier denied at ")?" "+denied.getMessage():""));}
         finally{if(staging!=null)removeOwnStaging(staging);}
     }
     private ProtectedDeliveryEvidence loadStaging(Path staged,TestProjectDeliveryRequest r,Seal seal,Verification verification)throws Exception{

@@ -179,6 +179,10 @@ func (s *Store) admit(ctx context.Context, c Admission, inventory *executionInve
 	return s.admitAt(ctx, c, inventory, profile, "INVESTIGATING", "MANUAL")
 }
 func (s *Store) admitAt(ctx context.Context, c Admission, inventory *executionInventory, profile *syntheticProfile, initialStage, trigger string) (AdmissionReceipt, error) {
+	return s.admitConfigured(ctx, c, inventory, profile, initialStage, trigger, nil)
+}
+
+func (s *Store) admitConfigured(ctx context.Context, c Admission, inventory *executionInventory, profile *syntheticProfile, initialStage, trigger string, slice *SliceLimits) (AdmissionReceipt, error) {
 	if !((initialStage == "INVESTIGATING" && trigger == "MANUAL") || (initialStage == "IMPLEMENTING" && trigger == "CONTROLLER_PROBE" && inventory == nil && profile == nil)) {
 		return AdmissionReceipt{}, ErrDeliveryDenied
 	}
@@ -220,7 +224,23 @@ func (s *Store) admitAt(ctx context.Context, c Admission, inventory *executionIn
 		return AdmissionReceipt{}, err
 	}
 	defer tx.Rollback()
-	if trigger == "CONTROLLER_PROBE" {
+	if slice != nil {
+		// One active workflow for this Owner-selected synthetic execution scope,
+		// including RECONCILIATION_REQUIRED. Short admission-only lock; model and
+		// verifier execution never hold a transaction or this lock.
+		if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, slice.ScopePrefix); err != nil {
+			return AdmissionReceipt{}, err
+		}
+		var active bool
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM orchestration.workflow_slice_profiles p JOIN orchestration.workflow_runs r ON r.run_id=p.run_id WHERE p.scope_prefix=$1 AND r.command_id<>$2::uuid AND r.state NOT IN ('COMPLETED_DRAFT_MR','BLOCKED','ESCALATED','FAILED','CANCELLED','SUPERSEDED'))`, slice.ScopePrefix, c.CommandID).Scan(&active)
+		if err != nil {
+			return AdmissionReceipt{}, err
+		}
+		if active {
+			return AdmissionReceipt{}, ErrConflict
+		}
+	}
+	if trigger == "CONTROLLER_PROBE" || slice != nil {
 		expiry, denied := lockDeliveryPolicy(ctx, tx, c.PolicyID, c.PolicyEpoch)
 		var now time.Time
 		if denied != nil || tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now) != nil || !now.Before(expiry) {
@@ -259,6 +279,11 @@ func (s *Store) admitAt(ctx context.Context, c Admission, inventory *executionIn
 	}
 	if profile != nil {
 		if err := insertSyntheticProfile(ctx, tx, runID, c.PolicyEpoch, *profile); err != nil {
+			return AdmissionReceipt{}, err
+		}
+	}
+	if slice != nil {
+		if err := insertSliceProfile(ctx, tx, runID, *slice); err != nil {
 			return AdmissionReceipt{}, err
 		}
 	}

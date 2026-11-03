@@ -28,6 +28,10 @@ type Runtime interface {
 	AcknowledgeDeliveryIntent(context.Context, workflow.DeliveryIntentAck) error
 	AcceptDeliveryOutcome(context.Context, workflow.DeliveryOutcomeEnvelope) error
 }
+type sliceRuntime interface {
+	AdvanceSliceReview(context.Context, string) (workflow.ReviewReceipt, error)
+}
+
 type Issuer interface {
 	SubmitControlledEvidence(context.Context, workflow.ControlledSubmission) error
 	IssueDeliveryReview(context.Context, string) error
@@ -114,6 +118,33 @@ func NewService(source Runtime, issuer Issuer) (http.Handler, error) {
 			err = issuer.SubmitControlledEvidence(ctx, command)
 			if err == nil {
 				_, err = source.AdvanceControlledReview(ctx, command.EvidenceID)
+			}
+			if err == nil {
+				err = issuer.IssueDeliveryReview(ctx, command.EvidenceID)
+			}
+			if err == nil {
+				value, err = source.AuthorizeDelivery(ctx, command.EvidenceID)
+			}
+		case "/internal/v1/controlled-slice-candidate":
+			_, ok := source.(sliceRuntime)
+			var command workflow.ControlledSubmission
+			if !ok || !decode(&command) || command.Request.RunVersion <= 3 {
+				http.Error(w, "synthetic slice unavailable", 400)
+				return
+			}
+			// Registers existing controller evidence only. No task completion,
+			// review transition, grant or delivery intent is issued here.
+			err = issuer.SubmitControlledEvidence(ctx, command)
+		case "/internal/v1/controlled-slice-review":
+			runtime, ok := source.(sliceRuntime)
+			var command workflow.ControlledSubmission
+			if !ok || !decode(&command) {
+				http.Error(w, "synthetic slice unavailable", 400)
+				return
+			}
+			err = issuer.SubmitControlledEvidence(ctx, command)
+			if err == nil {
+				_, err = runtime.AdvanceSliceReview(ctx, command.EvidenceID)
 			}
 			if err == nil {
 				err = issuer.IssueDeliveryReview(ctx, command.EvidenceID)

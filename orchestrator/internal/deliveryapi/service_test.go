@@ -34,6 +34,12 @@ func TestDeliveryServiceRejectsCrossRoleAndMalformedMessages(t *testing.T) {
 	}{
 		{"/delivery-intents/claim", ControllerIdentity, `{}`, "application/json", 403},
 		{"/controlled-admissions", ReaderIdentity, `{}`, "application/json", 403},
+		{"/controlled-slice-review", ReaderIdentity, `{}`, "application/json", 403},
+		{"/controlled-slice-candidate", ReaderIdentity, `{}`, "application/json", 403},
+		{"/controlled-slice-candidate", "spiffe://asep.local/agent", `{}`, "application/json", 403},
+		{"/controlled-slice-candidate", ControllerIdentity, `{}`, "application/json", 403},
+		{"/controlled-slice-review", "spiffe://asep.local/agent", `{}`, "application/json", 403},
+		{"/controlled-slice-review", ControllerIdentity, `{}`, "application/json", 403},
 		{"/delivery-outcomes", "spiffe://asep.local/agent", `{}`, "application/json", 403},
 		{"/delivery-intents/claim", ReaderIdentity, `{"approved":true}`, "application/json", 400},
 		{"/delivery-intents/claim", ReaderIdentity, `{"operationId":"a","OperationId":"b"}`, "application/json", 400},
